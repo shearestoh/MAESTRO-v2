@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+@layer base {
+  * {
+    border-color: #334155;
+  }
+  body {
+    background-color: #0a0f1e;
+    color: #e2e8f0;
+    font-family: "Inter", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::-webkit-scrollbar       { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #0f172a; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 9999px; }
+  ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+}
+
+@layer components {
+  .glass-panel {
+    background-color: rgba(30, 41, 59, 0.8);
+    backdrop-filter: blur(4px);
+    border: 1px solid #334155;
+    border-radius: 0.75rem;
+  }
+  .glow-blue  { box-shadow: 0 0 12px 2px rgba(59,  130, 246, 0.45); }
+  .glow-green { box-shadow: 0 0 12px 2px rgba(34,  197,  94, 0.45); }
+  .glow-amber { box-shadow: 0 0 12px 2px rgba(245, 158,  11, 0.45); }
+  .glow-red   { box-shadow: 0 0 12px 2px rgba(239,  68,  68, 0.45); }
+
+  .status-dot               { width: 0.5rem; height: 0.5rem; border-radius: 9999px; }
+  .status-dot.active        { background-color: #22c55e; animation: pulse 2s infinite; }
+  .status-dot.idle          { background-color: #64748b; }
+  .status-dot.error         { background-color: #ef4444; animation: pulse 2s infinite; }
+
+  .react-flow__background   { background-color: #0a0f1e !important; }
+  .react-flow__controls     { background: #1e293b !important; border-color: #334155 !important; }
+  .react-flow__controls-button {
+    background: #1e293b !important;
+    border-color: #334155 !important;
+    color: #94a3b8 !important;
+  }
+  .react-flow__controls-button:hover { background: #334155 !important; }
+  .react-flow__minimap      { background: #1e293b !important; }
+}
+
+@keyframes fadeIn  { from { opacity: 0; }                          to { opacity: 1; }              }
+@keyframes slideUp { from { transform: translateY(8px); opacity:0; } to { transform:translateY(0); opacity:1; } }
+
+.animate-fade-in  { animation: fadeIn  0.3s ease-in-out; }
+.animate-slide-up { animation: slideUp 0.3s ease-out;    }

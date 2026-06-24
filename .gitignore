@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+.env
+
+# Node
+node_modules/
+dist/
+.DS_Store
+
+# DB & artifacts
+*.db
+*.sqlite
+maestro_plot_*.png
+tmp/
