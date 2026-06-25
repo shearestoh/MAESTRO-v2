@@ -1,19 +1,62 @@
 """
-Pydantic data models — the single source of truth for all data shapes.
-
-Why Pydantic?
-- Automatic validation: if a field is wrong type, you get a clear error
-- Serialisation: .model_dump() gives you a plain dict for JSON responses
-- IDE support: full autocomplete on all fields
+Pydantic data models — single source of truth for all data shapes.
+Phase 2 additions: FigureModel, TableModel, SectionModel on DocumentModel.
 """
+from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
+
+
+# ── Document structure (MinerU-enriched) ─────────────────────────────────────
+
+class FigureModel(BaseModel):
+    """An extracted figure from a paper."""
+    figure_id:  str
+    page_idx:   int = 0
+    caption:    str = ""
+    path:       str = ""       # absolute path to saved image file
+    section:    str = ""       # heading of the section it belongs to
+    served_url: str = ""       # /media/{figure_id}
+
+
+class TableModel(BaseModel):
+    """An extracted table from a paper."""
+    table_id:  str
+    page_idx:  int = 0
+    caption:   str = ""
+    html:      str = ""        # HTML table string from MinerU
+    section:   str = ""
+
+
+class SectionModel(BaseModel):
+    """A structured section from a paper (MinerU heading hierarchy)."""
+    heading:    str
+    level:      int = 2        # 1=H1, 2=H2, 3=H3
+    content:    str = ""
+    figure_ids: List[str] = Field(default_factory=list)
+    table_ids:  List[str] = Field(default_factory=list)
+
+
+class DocumentModel(BaseModel):
+    """A PDF paper that has been uploaded and parsed."""
+    document_id:  str
+    filename:     str
+    title:        Optional[str] = None
+    raw_text:     str = ""
+    # Legacy: list of page strings (PyPDF2 fallback)
+    pages:        List[str] = Field(default_factory=list)
+    uploaded_at:  Optional[str] = None
+    summary:      Optional[str] = None
+    # Phase 2B: structured content from MinerU
+    sections:     List[SectionModel]  = Field(default_factory=list)
+    figures:      List[FigureModel]   = Field(default_factory=list)
+    tables:       List[TableModel]    = Field(default_factory=list)
+    mineru_used:  bool = False
 
 
 # ── Agent internals ───────────────────────────────────────────────────────────
 
 class AgentStateModel(BaseModel):
-    """Everything the LLM agent needs to maintain context."""
     messages:              List[dict]  = Field(default_factory=list)
     results_store:         List[dict]  = Field(default_factory=list)
     last_llm_message:      Optional[dict] = None
@@ -27,7 +70,7 @@ class AgentStateModel(BaseModel):
 # ── Equipment ─────────────────────────────────────────────────────────────────
 
 class EquipmentStatusModel(BaseModel):
-    """Which lab equipment is currently active (drives digital twin animation)."""
+    """Which lab equipment is currently active — drives digital twin animation."""
     llm:       bool = False
     optimiser: bool = False
     sampler:   bool = False
@@ -40,7 +83,6 @@ class EquipmentStatusModel(BaseModel):
 # ── Campaign ──────────────────────────────────────────────────────────────────
 
 class CampaignSpec(BaseModel):
-    """A fully-specified experimental campaign extracted from a paper or designed by the agent."""
     campaign_id:          str
     title:                str
     source_document_id:   str
@@ -55,23 +97,10 @@ class CampaignSpec(BaseModel):
     status:               str = "draft"
 
 
-# ── Documents ─────────────────────────────────────────────────────────────────
-
-class DocumentModel(BaseModel):
-    """A PDF paper that has been uploaded and parsed."""
-    document_id: str
-    filename:    str
-    title:       Optional[str] = None
-    raw_text:    str = ""
-    pages:       List[str] = Field(default_factory=list)
-    uploaded_at: Optional[str] = None
-    summary:     Optional[str] = None
-
-
 class CaseStudyExtraction(BaseModel):
-    document_id:      str
-    case_name:        str
-    campaign:         CampaignSpec
+    document_id:       str
+    case_name:         str
+    campaign:          CampaignSpec
     evidence_snippets: List[str] = Field(default_factory=list)
 
 
@@ -80,10 +109,9 @@ class CaseStudyExtraction(BaseModel):
 class ExecutionEvent(BaseModel):
     """
     A single live event emitted during workflow execution.
-    These are pushed to the frontend via WebSocket.
-    
-    equipment: which node to highlight in the digital twin
-    category:  controls colour in the activity feed
+    Pushed to the frontend via WebSocket.
+    equipment: which node to highlight in the digital twin.
+    category:  controls colour in the execution log.
     """
     event_type: str
     message:    str
@@ -103,12 +131,7 @@ class ArtifactModel(BaseModel):
 # ── Session ───────────────────────────────────────────────────────────────────
 
 class SessionModel(BaseModel):
-    """
-    The complete state of one user session.
-    
-    Everything the frontend needs is derived from this object via
-    session_state_payload() in orchestrator.py.
-    """
+    """Complete state of one user session."""
     session_id:    str
     agent_state:   AgentStateModel
 
@@ -128,7 +151,9 @@ class SessionModel(BaseModel):
     extracted_campaign: Optional[CampaignSpec] = None
 
     # UI state
-    equipment_status: EquipmentStatusModel = Field(default_factory=EquipmentStatusModel)
+    equipment_status: EquipmentStatusModel = Field(
+        default_factory=EquipmentStatusModel
+    )
     current_activity: Optional[str] = None
     activity_log:     List[str] = Field(default_factory=list)
     current_mission:  Optional[str] = None
@@ -144,6 +169,9 @@ class SessionModel(BaseModel):
 
     # Live event queue (drained by WebSocket endpoint)
     live_event_queue: List[ExecutionEvent] = Field(default_factory=list)
+
+    # Phase 2C: resource schedule log for Gantt display
+    resource_log: List[dict] = Field(default_factory=list)
 
 
 # ── API request/response shapes ───────────────────────────────────────────────

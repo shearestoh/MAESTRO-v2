@@ -22,16 +22,19 @@ export interface Artifact {
 }
 
 export interface ParameterSpec {
-  name: string;
-  min:  number;
-  max:  number;
-  unit: string;
+  name:          string;
+  original_name?: string;
+  min:           number;
+  max:           number;
+  unit:          string;
+  mapped_to_tool?: string;
 }
 
 export interface OperatingCondition {
-  name:   string;
-  values: number[];
-  unit:   string;
+  name:        string;
+  values:      number[];
+  unit:        string;
+  description?: string;
 }
 
 export interface CampaignSpec {
@@ -80,6 +83,22 @@ export interface Message {
   tool_calls?: ToolCall[];
 }
 
+// Phase 2C: resource log entry for Gantt
+export interface ResourceLogEntry {
+  tool:      string;
+  day:       number;
+  start_min: number;
+  end_min:   number;
+}
+
+// Dynamic metric labels (derived from campaign)
+export interface MetricLabels {
+  experiments: string;
+  best_result: string;
+  conditions:  string;
+  failures:    string;
+}
+
 export interface SessionState {
   session_id:                 string;
   messages:                   Message[];
@@ -106,6 +125,8 @@ export interface SessionState {
   background_job_index:       number;
   background_job_plan_length: number;
   timeline:                   TimelineItem[];
+  metric_labels:              MetricLabels;
+  resource_log:               ResourceLogEntry[];
 }
 
 // ── WebSocket Events ──────────────────────────────────────────────────────────
@@ -133,5 +154,43 @@ export interface EquipmentNodeData {
   noiseSigma?:   number;
   description?:  string;
   status:        "idle" | "active" | "failed" | "maintenance";
+  tool_id?:      string;
   [key: string]: unknown;
+}
+
+// ── Tool Registry ─────────────────────────────────────────────────────────────
+
+export interface VirtualTool {
+  tool_id:       string;
+  name:          string;
+  kind:          string;
+  description:   string;
+  parameters:    ToolParameter[];
+  outputs:       ToolOutput[];
+  failure_modes: ToolFailureMode[];
+  time_cost_min: number;
+  enabled:       boolean;
+}
+
+export interface ToolParameter {
+  name:        string;
+  type:        string;
+  min?:        number;
+  max?:        number;
+  unit:        string;
+  description: string;
+  required:    boolean;
+}
+
+export interface ToolOutput {
+  name:        string;
+  type:        string;
+  unit:        string;
+  description: string;
+}
+
+export interface ToolFailureMode {
+  name:        string;
+  description: string;
+  probability: number;
 }

@@ -1,15 +1,14 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useEffect } from "react";
-import { Sidebar }         from "@/components/layout/Sidebar";
-import { TopBar }          from "@/components/layout/TopBar";
-import { Dashboard }       from "@/pages/Dashboard";
-import { LabBuilder }      from "@/pages/LabBuilder";
-import { Campaign }        from "@/pages/Campaign";
-import { Reproducibility } from "@/pages/Reproducibility";
-import { useMaestroStore } from "@/store/maestroStore";
-import { useWebSocket }    from "@/hooks/useWebSocket";
-import { usePolling }      from "@/hooks/usePolling";
-import { Loader2 }         from "lucide-react";
+import { Sidebar }        from "@/components/layout/Sidebar";
+import { TopBar }         from "@/components/layout/TopBar";
+import { Dashboard }      from "@/pages/Dashboard";
+import { LabBuilder }     from "@/pages/LabBuilder";
+import { Campaign }       from "@/pages/Campaign";
+import { useMaestroStore }from "@/store/maestroStore";
+import { useWebSocket }   from "@/hooks/useWebSocket";
+import { usePolling }     from "@/hooks/usePolling";
+import { Loader2 }        from "lucide-react";
 
 function AppShell() {
   useWebSocket();
@@ -40,15 +39,20 @@ function AppShell() {
         {error && (
           <div className="bg-red-500/10 border-b border-red-500/30 px-4 py-2 flex items-center justify-between shrink-0">
             <span className="text-xs text-red-400">{error}</span>
-            <button onClick={clearErr} className="text-xs text-red-400 hover:underline">Dismiss</button>
+            <button
+              onClick={clearErr}
+              className="text-xs text-red-400 hover:underline"
+            >
+              Dismiss
+            </button>
           </div>
         )}
         <main className="flex-1 min-h-0 overflow-hidden">
           <Routes>
-            <Route path="/"                index element={<Dashboard />} />
-            <Route path="/lab"             element={<LabBuilder />} />
-            <Route path="/campaign"        element={<Campaign />} />
-            <Route path="/reproducibility" element={<Reproducibility />} />
+            <Route path="/"         index element={<Dashboard />} />
+            <Route path="/lab"      element={<LabBuilder />} />
+            <Route path="/campaign" element={<Campaign />} />
+            {/* Reproducibility removed — absorbed into Campaign */}
           </Routes>
         </main>
       </div>

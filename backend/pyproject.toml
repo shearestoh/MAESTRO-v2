@@ -1,7 +1,7 @@
 [project]
 name = "maestro-v3-backend"
-version = "0.1.0"
-description = "MAESTRO v3 — Agentic Scientific Orchestration Backend"
+version = "0.2.0"
+description = "MAESTRO v3 — Domain-Agnostic Agentic Scientific Orchestration"
 readme = "README.md"
 requires-python = ">=3.12"
 
@@ -26,7 +26,7 @@ dependencies = [
     # Plotting
     "matplotlib>=3.9.0",
 
-    # PDF parsing
+    # PDF parsing — PyPDF2 always available as fallback
     "pypdf2>=3.0.0",
 
     # Environment
@@ -36,11 +36,9 @@ dependencies = [
     "httpx>=0.27.0",
 ]
 
-# ── Fix 1: Tell hatchling where your code lives ───────────────────────────────
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 
-# ── Fix 2: Use the modern dependency-groups syntax ────────────────────────────
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",

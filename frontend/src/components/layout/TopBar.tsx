@@ -1,5 +1,5 @@
 import { useMaestroStore } from "@/store/maestroStore";
-import { RotateCcw, Sun } from "lucide-react";
+import { RotateCcw, Sun, Loader2 } from "lucide-react";
 
 export function TopBar() {
   const state     = useMaestroStore((s) => s.state);
@@ -7,26 +7,39 @@ export function TopBar() {
   const reset     = useMaestroStore((s) => s.reset);
   const isLoading = useMaestroStore((s) => s.isLoading);
   const bgActive  = state?.background_job_active ?? false;
+  const awaiting  = state?.awaiting_confirmation ?? false;
+
+  // Determine agent status
+  const statusLabel = bgActive
+    ? (state?.background_job_label ?? "Running workflow...")
+    : awaiting
+    ? "Awaiting your approval"
+    : isLoading
+    ? "Thinking..."
+    : "Idle — ready for instruction";
+
+  const statusColor = bgActive
+    ? "text-blue-400"
+    : awaiting
+    ? "text-amber-400"
+    : isLoading
+    ? "text-blue-400"
+    : "text-slate-500";
 
   return (
-    <header className="h-[72px] flex items-center justify-between px-6 bg-slate-900 border-b border-slate-700 shrink-0">
-      <div className="flex flex-col">
-        <div className="text-xs text-slate-500 uppercase tracking-wider font-semibold">
-          Current Mission
-        </div>
-        <div className="text-sm text-slate-200 font-medium max-w-xl truncate">
-          {state?.current_mission ?? "Awaiting scientific instruction."}
-        </div>
+    <header className="h-[60px] flex items-center justify-between px-6 bg-slate-900 border-b border-slate-700 shrink-0">
+      {/* Agent status */}
+      <div className={`flex items-center gap-2 text-sm font-medium ${statusColor}`}>
+        {(bgActive || isLoading) ? (
+          <Loader2 size={14} className="animate-spin shrink-0" />
+        ) : (
+          <span className={`status-dot ${bgActive || isLoading ? "active" : "idle"}`} />
+        )}
+        <span>{statusLabel}</span>
       </div>
 
-      <div className="flex items-center gap-3">
-        {bgActive && (
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 text-xs font-medium">
-            <span className="status-dot active" />
-            {state?.background_job_label ?? "Running"}
-          </div>
-        )}
-
+      {/* Controls */}
+      <div className="flex items-center gap-2">
         <button
           onClick={nextDay}
           disabled={bgActive || isLoading}
@@ -34,7 +47,6 @@ export function TopBar() {
         >
           <Sun size={12} /> Next Day
         </button>
-
         <button
           onClick={reset}
           disabled={bgActive || isLoading}

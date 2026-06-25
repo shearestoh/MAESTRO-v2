@@ -35,11 +35,26 @@ export function useWebSocket() {
     ws.onmessage = (ev) => {
       try {
         const event = JSON.parse(ev.data as string) as WsEvent;
-        pushWsEvent(event);
-        // Refresh full state on every state_update heartbeat
+
+        // Only push displayable events to the feed
+        // Filter out system heartbeats from the visible log
+        if (event.event_type !== "state_update") {
+          pushWsEvent(event);
+        }
+
+        // Refresh state on every state_update
+        // (now fires after every individual lab event)
         if (event.event_type === "state_update") {
           refreshState();
+
+          // Extra refresh when job finishes
+          const payload = event.payload as Record<string, unknown>;
+          if (payload.background_job_active === false &&
+              payload.background_job_status === "completed") {
+            setTimeout(() => refreshState(), 500);
+          }
         }
+
       } catch {
         // ignore malformed frames
       }

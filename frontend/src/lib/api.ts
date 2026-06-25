@@ -1,4 +1,4 @@
-import type { SessionState } from "@/types";
+import type { SessionState, VirtualTool } from "@/types";
 
 const BASE = "/api";
 
@@ -15,6 +15,7 @@ async function request<T>(path: string, opts?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  // ── Session ────────────────────────────────────────────────────────────────
   createSession: () =>
     request<{ session_id: string }>("/session", { method: "POST", body: "{}" }),
 
@@ -45,6 +46,7 @@ export const api = {
       body:   JSON.stringify({ session_id: sessionId }),
     }),
 
+  // ── Documents ──────────────────────────────────────────────────────────────
   uploadDocument: async (sessionId: string, file: File) => {
     const form = new FormData();
     form.append("session_id", sessionId);
@@ -57,28 +59,57 @@ export const api = {
     return res.json();
   },
 
+  getDocumentStructure: (documentId: string) =>
+    request<{
+      status:   string;
+      title:    string;
+      sections: unknown[];
+      figures:  unknown[];
+      tables:   unknown[];
+    }>(`/documents/${documentId}/structure`),
+
   extractCaseStudy: async (
     sessionId:  string,
     documentId: string,
-    caseName:   string
+    caseName:   string,
   ) => {
     const form = new FormData();
     form.append("session_id", sessionId);
     form.append("case_name",  caseName);
     const res = await fetch(
       `${BASE}/documents/${documentId}/extract-case-study`,
-      { method: "POST", body: form }
+      { method: "POST", body: form },
     );
     if (!res.ok) throw new Error(`Extraction failed: ${res.status}`);
     return res.json();
   },
 
+  // ── Tool registry ──────────────────────────────────────────────────────────
+  listTools: () =>
+    request<{ status: string; tools: VirtualTool[] }>("/tools"),
+
+  registerTool: (toolData: Partial<VirtualTool>) =>
+    request<{ status: string; tool: VirtualTool }>("/tools", {
+      method: "POST",
+      body:   JSON.stringify(toolData),
+    }),
+
+  updateTool: (toolId: string, updates: Partial<VirtualTool>) =>
+    request<{ status: string; tool: VirtualTool }>(`/tools/${toolId}`, {
+      method: "PUT",
+      body:   JSON.stringify(updates),
+    }),
+
+  deleteTool: (toolId: string) =>
+    request<{ status: string }>(`/tools/${toolId}`, { method: "DELETE" }),
+
+  // ── Exports ────────────────────────────────────────────────────────────────
   exportResultsCsv:  (sessionId: string) =>
-    fetch(`${BASE}/export/results-csv/${sessionId}`,  { method: "POST" }),
+    fetch(`${BASE}/export/results-csv/${sessionId}`,   { method: "POST" }),
 
   exportResultsJson: (sessionId: string) =>
-    fetch(`${BASE}/export/results-json/${sessionId}`, { method: "POST" }),
+    fetch(`${BASE}/export/results-json/${sessionId}`,  { method: "POST" }),
 
   exportCampaignJson:(sessionId: string) =>
-    fetch(`${BASE}/export/campaign-json/${sessionId}`,{ method: "POST" }),
+    fetch(`${BASE}/export/campaign-json/${sessionId}`, { method: "POST" }),
 };

@@ -1,3 +1,7 @@
+"""
+FastAPI application entry point.
+Intentionally thin — wires router, WebSocket, and startup hooks.
+"""
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -19,13 +23,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register default virtual tools on startup
-# These can be modified/extended via the Lab Builder
+
 @app.on_event("startup")
 def startup():
+    """Register default virtual tools on startup."""
     register_default_tools()
 
+
 app.include_router(router)
+
 
 @app.websocket("/ws/{session_id}")
 async def ws_route(websocket: WebSocket, session_id: str):

@@ -1,13 +1,10 @@
 """
 Session management and background job execution.
-
-Architecture principles (robust version):
-- Background thread ONLY executes science steps. Never calls LLM.
-- LLM is ONLY called from synchronous API request handlers.
-- Each plan step is isolated — one step failing never crashes the job.
-- Job completion is signalled via a dedicated flag, not inferred.
-- Session state mutations are always done under the session lock.
+Robust version: LLM never called in background thread.
+Each plan step isolated — one failure never crashes the job.
 """
+from __future__ import annotations
+
 import json
 import threading
 import time
@@ -21,6 +18,7 @@ from app.core.models import (
     AgentStateModel,
     ArtifactModel,
     EquipmentStatusModel,
+    ExecutionEvent, 
     SessionModel,
 )
 from app.core.tools import (
@@ -48,7 +46,7 @@ def _welcome_message() -> dict:
             "- Design and run optimisation campaigns\n"
             "- Upload a paper PDF for reproduction\n"
             "- Query your experimental results\n"
-            "- Add tools to your virtual lab\n\n"
+            "- Add tools to your virtual lab via the Lab Builder\n\n"
             "What would you like to explore today?"
         ),
     }
@@ -89,25 +87,33 @@ def reset_session(session_id: str) -> SessionModel:
 # ── User message handling ─────────────────────────────────────────────────────
 
 def post_user_message(session_id: str, text: str) -> SessionModel:
-    """
-    Handle a user message. This is called from the API request thread.
-    LLM calls are safe here — they block the request, not a background thread.
-    """
+    """Called from API request thread — LLM call is safe here."""
     session = get_session(session_id)
     lock    = _lock_for(session_id)
 
     with lock:
-        session.equipment_status.llm = True
-        session.current_activity     = "Thinking..."
         session.agent_state.messages.append({"role": "user", "content": text})
         session.current_mission = text
+        session.live_event_queue.append(ExecutionEvent(
+            event_type="llm_thinking",
+            message="Thinking...",
+            equipment="llm",
+            category="planning",
+            payload={},
+        ))
 
-    # LLM call outside lock — it's slow but only blocks this request thread
     llm_plan(session)
 
     with lock:
         session.equipment_status.llm = False
         session.current_activity     = None
+        session.live_event_queue.append(ExecutionEvent(
+            event_type="llm_done",
+            message="Response ready.",
+            equipment="llm",
+            category="planning",
+            payload={},
+        ))
 
     return session
 
@@ -115,10 +121,7 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
 # ── Live event consumption ────────────────────────────────────────────────────
 
 def _consume_one_live_event(session: SessionModel):
-    """
-    Pop one event from the queue and update session UI state.
-    Must be called under the session lock.
-    """
+    """Pop one event and update session UI state. Call under lock."""
     if not session.live_event_queue:
         return
 
@@ -128,7 +131,7 @@ def _consume_one_live_event(session: SessionModel):
     session.activity_log.append(f"[{event.category.upper()}] {event.message}")
     session.activity_log = session.activity_log[-20:]
 
-    # Update equipment status to animate the correct digital twin node
+    # Update equipment status for digital twin animation
     session.equipment_status = EquipmentStatusModel()
     eq_map = {
         "llm":       "llm",
@@ -150,18 +153,16 @@ def _run_background_job(session_id: str):
     """
     Worker thread: executes the approved plan step by step.
 
-    Design principles:
-    1. Never calls LLM — avoids timeout/500 errors in background thread
-    2. Each step is wrapped in try/except — one bad step never kills the job
-    3. Always sets background_job_active=False on exit (success OR failure)
-    4. Uses a dedicated completion flag so WebSocket can signal frontend cleanly
-    5. Lock is held only for state mutations, not for slow I/O
+    Invariants:
+    - Never calls LLM (avoids 500 errors / timeouts in background thread)
+    - Each step wrapped in try/except (one bad step never kills the job)
+    - Always sets background_job_active=False on exit (success OR failure)
+    - Lock held only for state mutations, not for slow I/O
     """
     session = get_session(session_id)
     lock    = _lock_for(session_id)
 
-    def _mark_complete(success: bool, error_msg: str = ""):
-        """Atomically mark the job as done and clean up UI state."""
+    def _mark_done(success: bool, error_msg: str = ""):
         with lock:
             session.background_job_active  = False
             session.background_job_status  = "completed" if success else "failed"
@@ -172,16 +173,14 @@ def _run_background_job(session_id: str):
             if not success:
                 session.background_job_error = error_msg
                 session.agent_state.messages.append({
-                    "role": "assistant",
+                    "role":    "assistant",
                     "content": (
                         f"⚠️ The workflow stopped due to an error.\n\n"
                         f"**Details:** `{error_msg}`\n\n"
-                        f"Any results collected before the error have been saved. "
-                        f"You can ask me to continue or reset and try again."
+                        f"Any results collected before the error have been saved."
                     ),
                 })
             else:
-                # Build completion summary from results — no LLM call needed
                 results  = session.agent_state.results_store
                 n_evals  = sum(len(r.get("X", [])) for r in results)
                 n_fails  = sum(r.get("failed_samples", 0) for r in results)
@@ -189,20 +188,24 @@ def _run_background_job(session_id: str):
                     (r.get("best_energy") or 0.0 for r in results),
                     default=0.0,
                 )
+                obj      = (
+                    session.extracted_campaign.objective_metric
+                    if session.extracted_campaign else "objective"
+                )
                 powers_done = [
-                    f"{int(r['power_W'])}W" for r in results if r.get("X")
+                    f"{int(r['power_W'])}" for r in results if r.get("X")
                 ]
 
                 session.agent_state.messages.append({
-                    "role": "assistant",
+                    "role":    "assistant",
                     "content": (
                         f"✅ **Workflow complete.**\n\n"
                         f"| Metric | Value |\n"
                         f"|--------|-------|\n"
-                        f"| Evaluations | {n_evals} |\n"
-                        f"| Best specific energy | {best_e:.2f} Wh/kg |\n"
-                        f"| Failed samples | {n_fails} |\n"
-                        f"| Power levels completed | {', '.join(powers_done) or 'none'} |\n\n"
+                        f"| Experiments run | {n_evals} |\n"
+                        f"| Best {obj} | {best_e:.2f} |\n"
+                        f"| Failed steps | {n_fails} |\n"
+                        f"| Conditions completed | {', '.join(powers_done) or 'none'} |\n\n"
                         f"Ask me to **generate a summary figure**, "
                         f"**analyse the results**, or **continue tomorrow**."
                     ),
@@ -210,24 +213,22 @@ def _run_background_job(session_id: str):
 
     try:
         while True:
-            # ── Tick: one unit of work per iteration ──────────────────────────
             with lock:
                 has_events = bool(session.live_event_queue)
-                has_steps  = session.background_job_index < len(session.background_job_plan)
+                has_steps  = (
+                    session.background_job_index < len(session.background_job_plan)
+                )
 
             if has_events:
                 with lock:
                     _consume_one_live_event(session)
 
             elif has_steps:
-                # Read step outside lock so we don't hold it during execution
                 with lock:
-                    step  = session.background_job_plan[session.background_job_index]
+                    step = session.background_job_plan[session.background_job_index]
                     session.background_job_label  = step.get("kind", "running")
                     session.background_job_status = "running"
 
-                # Execute step — this is where slow I/O happens (BO, DB writes)
-                # Isolated in try/except so one bad step doesn't kill the job
                 try:
                     result = execute_plan_step(session, step, query_database)
                     with lock:
@@ -239,28 +240,25 @@ def _run_background_job(session_id: str):
                             f"[WARNING] Step '{step.get('kind')}' error: {step_err}"
                         )
                         session.activity_log = session.activity_log[-20:]
-                        session.background_job_index += 1  # skip bad step, continue
+                        session.background_job_index += 1  # skip, continue
 
             else:
-                # No events, no steps left → job is done
-                _mark_complete(success=True)
+                _mark_done(success=True)
                 break
 
             time.sleep(0.25)
 
-    except Exception as fatal_err:
-        # Truly unexpected error (e.g. memory corruption, import error)
-        _mark_complete(success=False, error_msg=f"{type(fatal_err).__name__}: {fatal_err}")
+    except Exception as fatal:
+        _mark_done(
+            success=False,
+            error_msg=f"{type(fatal).__name__}: {fatal}",
+        )
 
 
 # ── Workflow confirmation ─────────────────────────────────────────────────────
 
 def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
-    """
-    Called from the API request thread when user approves or aborts a workflow.
-    If proceeding, spawns the background job thread.
-    If aborting, calls LLM synchronously (safe — we're in a request thread).
-    """
+    """Called from API request thread."""
     session = get_session(session_id)
     lock    = _lock_for(session_id)
 
@@ -283,18 +281,14 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
             session.agent_state.awaiting_confirmation = False
             session.agent_state.pending_tool_calls    = []
 
-        # Spawn daemon thread — dies automatically if the server dies
-        t = threading.Thread(
+        threading.Thread(
             target=_run_background_job,
             args=(session_id,),
             daemon=True,
             name=f"maestro-job-{session_id[:8]}",
-        )
-        t.start()
+        ).start()
 
     else:
-        # Abort path — inject tool rejection messages then call LLM
-        # This is safe because we're in the API request thread
         with lock:
             for tc in session.agent_state.pending_tool_calls:
                 session.agent_state.messages.append({
@@ -313,7 +307,7 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
             session.agent_state.pending_tool_calls    = []
             session.equipment_status.llm              = True
 
-        llm_plan(session)  # Safe — request thread
+        llm_plan(session)   # Safe — request thread
 
         with lock:
             session.equipment_status.llm = False
@@ -339,11 +333,22 @@ def register_artifact(session: SessionModel, name: str, kind: str, path: str):
 # ── State serialisation ───────────────────────────────────────────────────────
 
 def session_state_payload(session: SessionModel) -> dict:
-    """Serialise the full session state for the frontend."""
+    """Serialise full session state for the frontend."""
+    results = session.agent_state.results_store
+
+    # Dynamic metric labels — derived from campaign objective
+    obj_label = "Objective"
+    cond_label = "Conditions"
+    if session.extracted_campaign:
+        obj_label  = session.extracted_campaign.objective_metric or "Objective"
+        conds      = session.extracted_campaign.operating_conditions
+        if conds:
+            cond_label = conds[0].get("name", "Conditions")
+
     return {
         "session_id":                 session.session_id,
         "messages":                   session.agent_state.messages,
-        "results_store":              session.agent_state.results_store,
+        "results_store":              results,
         "awaiting_confirmation":      session.agent_state.awaiting_confirmation,
         "pending_tool_calls":         session.agent_state.pending_tool_calls,
         "last_tool_result":           session.agent_state.last_tool_result,
@@ -369,4 +374,13 @@ def session_state_payload(session: SessionModel) -> dict:
         "background_job_index":       session.background_job_index,
         "background_job_plan_length": len(session.background_job_plan),
         "timeline":                   build_dynamic_timeline(session),
+        # Dynamic metric labels for frontend
+        "metric_labels": {
+            "experiments":  "Experiments",
+            "best_result":  f"Best {obj_label}",
+            "conditions":   f"{cond_label} Run",
+            "failures":     "Failed Steps",
+        },
+        # Phase 2C: resource log for Gantt
+        "resource_log":               session.resource_log[-100:],
     }
