@@ -105,26 +105,31 @@ DECISION TREE — follow this strictly:
 3. USER ASKS TO SEE A FIGURE FROM THE PAPER:
    → Check the LAB STATE message for the figure list
    → Search for a figure whose caption contains the requested figure number
-     e.g. "Figure 5" → look for caption containing "Figure 5" or "figure 5"
-   → If found: render it immediately as: ![caption](/api/media/{figure_id})
-   → If NOT found: say clearly "Figure X could not be extracted from this paper
-     (likely a vector graphic or multi-panel figure that MinerU could not capture).
-     The available figures are: [list captions briefly]"
-   → Do NOT silently show a different figure as a substitute without telling the user
+     e.g. "Figure 1" → look for any caption containing "Figure 1" or "figure 1"
+     e.g. "show me figure 3" → look for caption containing "Figure 3"
+   → If found: render it IMMEDIATELY without any preamble:
+     ![caption text](/api/media/{exact_figure_id_from_LAB_STATE})
+   → If the caption contains the figure number, it IS available — render it
+   → Only say "could not be extracted" if the figure number does NOT appear
+     in ANY caption in the LAB STATE figure list
    → Do NOT list raw figure IDs — only show captions and render images
    → Use ONLY figure IDs from the LAB STATE list — never invent IDs
    → If no figures are listed in LAB STATE, say no figures are available
 
-4. USER EXPLICITLY ASKS TO REPRODUCE OR CHECK FEASIBILITY:
-   → Only call extract_and_check_feasibility when the user uses explicit language:
-     "reproduce", "can you run this", "is it feasible", "execute this experiment",
-     "check if the lab can do this"
-   → Do NOT call this tool just because the user asks what a case study is about
-   → Requires a paper to be uploaded first
+4. USER ASKS TO CHECK FEASIBILITY:
+   → Call extract_and_check_feasibility ONCE
+   → Only when user asks "is it feasible", "can the lab do this",
+     "can you reproduce", "check feasibility"
+   → Do NOT call again if LAB STATE shows "CAMPAIGN ALREADY EXTRACTED"
+   → After the report appears, wait for the user to say "run it"
 
-5. USER APPROVES EXECUTION (after feasibility confirmed):
-   → Call run_extracted_campaign
-   → Only if extracted_campaign is available and feasible
+5. USER SAYS "RUN IT" OR APPROVES EXECUTION:
+   → Trigger words: "run it", "run", "yes", "proceed",
+     "execute", "go ahead", "start", "do it", "let's go"
+   → Check LAB STATE — if it says "CAMPAIGN ALREADY EXTRACTED":
+     call run_extracted_campaign IMMEDIATELY
+   → Do NOT call extract_and_check_feasibility again under any circumstances
+   → Do NOT ask for more confirmation — just call run_extracted_campaign
 
 6. USER ASKS ABOUT EXISTING RESULTS:
    → Call query_database with a specific SQL query
@@ -218,8 +223,11 @@ def build_tools_schema() -> list:
                 "description": (
                     "Extract an experimental campaign from the uploaded paper "
                     "and check whether the current virtual lab tools can execute it. "
-                    "Use this when the user asks to reproduce results, check feasibility, "
-                    "or asks what a paper's experiment requires. "
+                    "Use this when the user uses explicit language like 'reproduce', "
+                    "'is it feasible', 'can the lab do this', 'check feasibility'. "
+                    "This is a READ-ONLY analysis — it does not run any experiments. "
+                    "It will show a feasibility report and ask the user if they want "
+                    "to proceed with execution. "
                     "Requires a paper to be uploaded first."
                 ),
                 "parameters": {
@@ -229,8 +237,7 @@ def build_tools_schema() -> list:
                             "type": "string",
                             "description": (
                                 "The specific case study or section to extract, "
-                                "e.g. 'Case Study 2', 'Figure 3 experiment', "
-                                "'Section 3.2 results'"
+                                "e.g. 'Case Study 2', 'Case Study 3'"
                             ),
                         },
                     },
@@ -243,10 +250,14 @@ def build_tools_schema() -> list:
             "function": {
                 "name": "run_extracted_campaign",
                 "description": (
-                    "Execute the currently extracted experimental campaign "
-                    "using the available lab tools. "
-                    "Only call this after extract_and_check_feasibility has confirmed "
-                    "the campaign is feasible and the user has approved execution."
+                    "Execute the currently extracted experimental campaign. "
+                    "Call this when the user says 'run it', 'run', 'yes', "
+                    "'proceed', 'execute', 'go ahead', 'start', or any "
+                    "affirmative response after a feasibility report. "
+                    "Only call this when extracted_campaign is available "
+                    "(shown in LAB STATE as CAMPAIGN ALREADY EXTRACTED). "
+                    "Do NOT call extract_and_check_feasibility again — "
+                    "if feasibility was already confirmed, call this directly."
                 ),
                 "parameters": {
                     "type": "object",
@@ -320,11 +331,14 @@ def build_lab_context_message(session) -> dict:
     if session.extracted_campaign:
         c = session.extracted_campaign
         campaign_text = (
-            f"Active campaign: '{c.title}'. "
+            f"CAMPAIGN ALREADY EXTRACTED — do not call "
+            f"extract_and_check_feasibility again. "
+            f"Campaign: '{c.title}'. "
             f"Objective: {c.objective_metric}. "
             f"Parameters: {[p['name'] for p in c.parameter_space]}. "
             f"Conditions: {c.operating_conditions}. "
-            f"Status: {c.status}."
+            f"Status: {c.status}. "
+            f"If user says 'run it' or similar, call run_extracted_campaign."
         )
 
     outstanding_text = ""
@@ -383,23 +397,34 @@ def build_lab_context_message(session) -> dict:
             # Date is often on page 1 footer or journal header, beyond first 1200 chars
             date_snippet = ""
             if doc.raw_text:
-                import re as _re
-                # Search for year patterns: "2024", "December 4, 2024", etc.
+                # Search broader range — date often in footer/header beyond first 8000 chars
+                search_text = doc.raw_text[:15000]
                 date_patterns = [
+                    # "December 4, 2024" or "December 2024"
                     r'(?:January|February|March|April|May|June|July|August|'
                     r'September|October|November|December)\s+\d{1,2},?\s+\d{4}',
-                    r'Published[:\s]+\w+\s+\d{1,2},?\s+\d{4}',
-                    r'Received[:\s].{0,60}(?:Accepted|Published)[:\s].{0,60}\d{4}',
-                    r'\d{4}\s*[,\.]\s*(?:Vol|Volume|Issue)',
-                    r'(?:doi|DOI)[:\s].{5,60}',
+                    # "Published: September 23, 2024"
+                    r'Published[:\s]+\S+\s+\d{1,2},?\s+\d{4}',
+                    # "Received: April 2, 2024 ... Accepted: August 16, 2024"
+                    r'Received[:\s].{0,80}(?:Accepted|Published)[:\s].{0,80}\d{4}',
+                    # "Matter 7, 4260–4269, December 4, 2024"
+                    r'(?:Matter|Nature|Science|Cell|JACS|ACS|RSC|Elsevier)'
+                    r'.{0,50}\d{4}',
+                    # "2024, Vol. 7"
+                    r'\d{4}\s*[,\.]\s*(?:Vol|Volume|Issue|No\.)',
+                    # DOI line often contains year
+                    r'(?:doi|DOI|https://doi)[:\s/].{5,80}',
+                    # Copyright year
+                    r'©\s*\d{4}',
+                    # "ª 2024" (Elsevier style)
+                    r'ª\s*\d{4}',
                 ]
                 for pattern in date_patterns:
-                    match = _re.search(pattern, doc.raw_text[:8000])
+                    match = re.search(pattern, search_text)
                     if match:
-                        # Get surrounding context
-                        start = max(0, match.start() - 50)
-                        end   = min(len(doc.raw_text), match.end() + 100)
-                        date_snippet = doc.raw_text[start:end].strip()
+                        start = max(0, match.start() - 80)
+                        end   = min(len(search_text), match.end() + 150)
+                        date_snippet = search_text[start:end].strip()
                         date_snippet = ' '.join(date_snippet.split())
                         break
 
@@ -419,9 +444,16 @@ def build_lab_context_message(session) -> dict:
             section_toc = ""
             if doc.sections:
                 toc_lines = [f"\nSection headings ({len(doc.sections)} total):"]
-                for i, s in enumerate(doc.sections[:40]):  # cap at 40
+                for i, s in enumerate(doc.sections[:40]):
                     indent = "  " * min(s.level - 1, 3)
-                    toc_lines.append(f"  {indent}{i + 1}. {s.heading}")
+                    # Include first 120 chars of content for context
+                    # so agent can answer "what is section N about"
+                    preview = ""
+                    if s.content and len(s.content) > 20:
+                        preview = f" — {s.content[:120].strip()}..."
+                    toc_lines.append(
+                        f"  {indent}{i + 1}. {s.heading}{preview}"
+                    )
                 section_toc = "\n".join(toc_lines)
 
             doc_context_text = (

@@ -546,7 +546,13 @@ def execute_plan_step(session, step: dict, query_database_fn) -> Dict:
 def build_execution_plan_from_tool_calls(
     session, tool_calls: List[dict]
 ) -> List[dict]:
-    """Convert LLM tool calls into a concrete execution plan."""
+    """
+    Convert LLM tool calls into a concrete execution plan.
+
+    IMPORTANT: extract_and_check_feasibility is NOT added to the background
+    job plan — it runs synchronously in confirm_pending() instead.
+    Only experiment execution steps go into the background job.
+    """
     plan: List[dict] = []
 
     for tc in tool_calls:
@@ -558,10 +564,10 @@ def build_execution_plan_from_tool_calls(
             pass
 
         if name == "extract_and_check_feasibility":
-            plan.append({
-                "kind":      "extract_feasibility",
-                "case_name": args.get("case_name", "Case Study"),
-            })
+            # This runs synchronously — NOT in the background job
+            # Handled directly in confirm_pending() before job starts
+            # Do NOT add to plan
+            pass
 
         elif name == "run_extracted_campaign":
             plan.append({
@@ -608,7 +614,6 @@ def build_execution_plan_from_tool_calls(
             })
 
     return plan
-
 
 # ── Timeline builder ──────────────────────────────────────────────────────────
 

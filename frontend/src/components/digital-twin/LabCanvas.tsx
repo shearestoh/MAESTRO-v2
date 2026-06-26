@@ -66,9 +66,13 @@ function LabCanvasInner() {
     setNodes(makeNodes(eq));
     setEdges((eds) =>
       eds.map((e) => {
-        const srcActive = eq[e.source as keyof EquipmentStatus] ?? (e.source === "maestro" && eq.llm);
-        const tgtActive = eq[e.target as keyof EquipmentStatus] ?? (e.target === "maestro" && eq.llm);
-        const animated  = srcActive || tgtActive;
+        const nonMaestroId     = e.source === "maestro" ? e.target : e.source;
+        const nonMaestroActive = eq[nonMaestroId as keyof EquipmentStatus] ?? false;
+        const isMaestroEdge    = e.source === "maestro" || e.target === "maestro";
+        const pipelineActive   =
+          (eq[e.source as keyof EquipmentStatus] ?? false) ||
+          (eq[e.target as keyof EquipmentStatus] ?? false);
+        const animated         = isMaestroEdge ? nonMaestroActive : pipelineActive;
         return {
           ...e,
           animated,

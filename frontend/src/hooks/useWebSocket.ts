@@ -36,23 +36,30 @@ export function useWebSocket() {
       try {
         const event = JSON.parse(ev.data as string) as WsEvent;
 
-        // Only push displayable events to the feed
-        // Filter out system heartbeats from the visible log
+        // Push all non-heartbeat events to the visible feed
         if (event.event_type !== "state_update") {
           pushWsEvent(event);
         }
 
-        // Refresh state on every state_update
-        // (now fires after every individual lab event)
+        // Refresh on state_update (fires after every lab event)
         if (event.event_type === "state_update") {
           refreshState();
-
-          // Extra refresh when job finishes
           const payload = event.payload as Record<string, unknown>;
-          if (payload.background_job_active === false &&
-              payload.background_job_status === "completed") {
+          if (
+            payload.background_job_active === false &&
+            payload.background_job_status === "completed"
+          ) {
             setTimeout(() => refreshState(), 500);
           }
+        }
+
+        // ALSO refresh immediately on any equipment event
+        // This is the belt-and-braces fix for node lighting:
+        // state_update fires 80ms after the equipment event,
+        // by which time equipment_status may already be reset.
+        // Refreshing on the equipment event itself catches it while still True.
+        if (event.equipment !== null && event.equipment !== undefined) {
+          refreshState();
         }
 
       } catch {

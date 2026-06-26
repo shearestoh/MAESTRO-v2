@@ -93,7 +93,9 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
 
     with lock:
         session.agent_state.messages.append({"role": "user", "content": text})
-        session.current_mission = text
+        session.current_mission      = text
+        session.equipment_status     = EquipmentStatusModel(llm=True)
+        session.current_activity     = "Thinking..."
         session.live_event_queue.append(ExecutionEvent(
             event_type="llm_thinking",
             message="Thinking...",
@@ -104,9 +106,61 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
 
     llm_plan(session)
 
+    # Auto-approve feasibility checks — read-only, no user approval needed
+    # Only run_extracted_campaign needs explicit user approval
+    if session.agent_state.awaiting_confirmation:
+        pending_names = [
+            tc["function"]["name"]
+            for tc in session.agent_state.pending_tool_calls
+        ]
+        all_feasibility = all(
+            n == "extract_and_check_feasibility"
+            for n in pending_names
+        )
+        if all_feasibility:
+            pending_calls = list(session.agent_state.pending_tool_calls)
+
+            with lock:
+                session.agent_state.awaiting_confirmation = False
+                session.agent_state.pending_tool_calls    = []
+                session.equipment_status = EquipmentStatusModel(knowledge=True)
+                session.current_activity = "Checking feasibility..."
+
+            for tc in pending_calls:
+                args = {}
+                try:
+                    args = json.loads(tc["function"]["arguments"] or "{}")
+                except Exception:
+                    pass
+                case_name = args.get("case_name", "Case Study")
+
+                # Required by OpenAI: tool_calls must be followed by tool response
+                session.agent_state.messages.append({
+                    "role":         "tool",
+                    "tool_call_id": tc["id"],
+                    "name":         tc["function"]["name"],
+                    "content":      json.dumps({
+                        "status":    "running",
+                        "case_name": case_name,
+                    }),
+                })
+
+                step = {"kind": "extract_feasibility", "case_name": case_name}
+                try:
+                    execute_plan_step(session, step, query_database)
+                except Exception as e:
+                    session.agent_state.messages.append({
+                        "role":    "assistant",
+                        "content": f"Error during feasibility check: `{e}`",
+                    })
+
+            with lock:
+                session.equipment_status = EquipmentStatusModel()
+                session.current_activity = None
+
     with lock:
-        session.equipment_status.llm = False
-        session.current_activity     = None
+        session.equipment_status = EquipmentStatusModel()
+        session.current_activity = None
         session.live_event_queue.append(ExecutionEvent(
             event_type="llm_done",
             message="Response ready.",
@@ -258,7 +312,14 @@ def _run_background_job(session_id: str):
 # ── Workflow confirmation ─────────────────────────────────────────────────────
 
 def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
-    """Called from API request thread."""
+    """
+    Called from API request thread when user approves or aborts a workflow.
+
+    Special handling for extract_and_check_feasibility:
+    - Runs synchronously here (not in background job)
+    - Does NOT require user approval — it's a read-only operation
+    - Only run_extracted_campaign requires approval + background job
+    """
     session = get_session(session_id)
     lock    = _lock_for(session_id)
 
@@ -267,28 +328,90 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
             return session
 
     if proceed:
-        with lock:
-            plan = build_execution_plan_from_tool_calls(
-                session, session.agent_state.pending_tool_calls
-            )
-            session.background_job_plan        = plan
-            session.background_job_index       = 0
-            session.background_job_status      = "running"
-            session.background_job_active      = True
-            session.background_job_label       = "Initialising..."
-            session.background_job_error       = None
-            session.live_event_queue           = []
-            session.agent_state.awaiting_confirmation = False
-            session.agent_state.pending_tool_calls    = []
+        pending_calls = session.agent_state.pending_tool_calls
 
-        threading.Thread(
-            target=_run_background_job,
-            args=(session_id,),
-            daemon=True,
-            name=f"maestro-job-{session_id[:8]}",
-        ).start()
+        # Check if this is purely a feasibility check (no execution)
+        tool_names = [tc["function"]["name"] for tc in pending_calls]
+        is_feasibility_only = (
+            all(n == "extract_and_check_feasibility" for n in tool_names)
+        )
+
+        if is_feasibility_only:
+            # Run feasibility synchronously — no background job needed
+            with lock:
+                session.agent_state.awaiting_confirmation = False
+                session.agent_state.pending_tool_calls    = []
+                session.equipment_status = EquipmentStatusModel(knowledge=True)
+                session.current_activity = "Checking feasibility..."
+
+            for tc in pending_calls:
+                args = {}
+                try:
+                    args = json.loads(tc["function"]["arguments"] or "{}")
+                except Exception:
+                    pass
+                case_name = args.get("case_name", "Case Study")
+
+                # Inject tool response BEFORE executing so message history
+                # is valid for subsequent LLM calls
+                # OpenAI requires: assistant tool_calls → tool response
+                session.agent_state.messages.append({
+                    "role":         "tool",
+                    "tool_call_id": tc["id"],
+                    "name":         tc["function"]["name"],
+                    "content":      json.dumps({
+                        "status":    "running",
+                        "case_name": case_name,
+                    }),
+                })
+
+                step = {"kind": "extract_feasibility", "case_name": case_name}
+                try:
+                    execute_plan_step(session, step, query_database)
+                except Exception as e:
+                    session.agent_state.messages.append({
+                        "role":    "assistant",
+                        "content": f"Error during feasibility check: `{e}`",
+                    })
+
+            with lock:
+                session.equipment_status = EquipmentStatusModel()
+                session.current_activity = None
+
+        else:
+            # Build plan for background execution
+            # extract_and_check_feasibility is excluded from plan
+            # (handled above or already done)
+            with lock:
+                plan = build_execution_plan_from_tool_calls(
+                    session, pending_calls
+                )
+
+                # If plan is empty after filtering, don't start a job
+                if not plan:
+                    session.agent_state.awaiting_confirmation = False
+                    session.agent_state.pending_tool_calls    = []
+                    return session
+
+                session.background_job_plan        = plan
+                session.background_job_index       = 0
+                session.background_job_status      = "running"
+                session.background_job_active      = True
+                session.background_job_label       = "Initialising..."
+                session.background_job_error       = None
+                session.live_event_queue           = []
+                session.agent_state.awaiting_confirmation = False
+                session.agent_state.pending_tool_calls    = []
+
+            threading.Thread(
+                target=_run_background_job,
+                args=(session_id,),
+                daemon=True,
+                name=f"maestro-job-{session_id[:8]}",
+            ).start()
 
     else:
+        # Abort path
         with lock:
             for tc in session.agent_state.pending_tool_calls:
                 session.agent_state.messages.append({
@@ -307,13 +430,12 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
             session.agent_state.pending_tool_calls    = []
             session.equipment_status.llm              = True
 
-        llm_plan(session)   # Safe — request thread
+        llm_plan(session)
 
         with lock:
             session.equipment_status.llm = False
 
     return session
-
 
 # ── Day management ────────────────────────────────────────────────────────────
 
