@@ -112,4 +112,10 @@ export const api = {
 
   exportCampaignJson:(sessionId: string) =>
     fetch(`${BASE}/export/campaign-json/${sessionId}`, { method: "POST" }),
+
+  // ── Plot ───────────────────────────────────────────────────────────────────
+  getPlotUrl: (sessionId: string) =>
+    `${BASE}/plot/${sessionId}`,
 };
+
+  

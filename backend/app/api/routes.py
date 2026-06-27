@@ -384,6 +384,27 @@ def get_tool(tool_id: str):
         raise HTTPException(404, f"Tool {tool_id} not found")
     return {"status": "ok", "tool": tool.model_dump()}
 
+# ── Plot serving ──────────────────────────────────────────────────────────────
+
+@router.get("/plot/{session_id}")
+def serve_plot(session_id: str):
+    """
+    Serve the most recently generated summary plot for a session.
+    The frontend polls this after the plotter job completes.
+    """
+    try:
+        session = get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+    path = session.show_plotter_image
+    if not path:
+        raise HTTPException(404, "No plot generated yet for this session")
+    if not os.path.exists(path):
+        raise HTTPException(404, "Plot file not found on disk")
+
+    return FileResponse(path, media_type="image/png")
+
 
 # ── Exports ───────────────────────────────────────────────────────────────────
 

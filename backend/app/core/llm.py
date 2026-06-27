@@ -488,6 +488,51 @@ def build_lab_context_message(session) -> dict:
     }
 
 # ── Main LLM planning call ────────────────────────────────────────────────────
+def _repair_tool_call_chain(messages: list) -> list:
+    """
+    Ensure every assistant message with tool_calls is followed by
+    matching tool response messages.
+
+    Called before every LLM invocation as a safety net.
+    Repairs in-place and returns the repaired list.
+    """
+    import json as _json
+
+    # Collect responded IDs
+    responded_ids: set[str] = set()
+    for msg in messages:
+        if msg.get("role") == "tool":
+            tc_id = msg.get("tool_call_id")
+            if tc_id:
+                responded_ids.add(tc_id)
+
+    # Find orphaned tool_call_ids
+    injections: list[tuple[int, dict]] = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls", []):
+            tc_id   = tc.get("id")
+            tc_name = tc.get("function", {}).get("name", "unknown_tool")
+            if tc_id and tc_id not in responded_ids:
+                injections.append((i + 1, {
+                    "role":         "tool",
+                    "tool_call_id": tc_id,
+                    "name":         tc_name,
+                    "content":      _json.dumps({
+                        "status":  "completed",
+                        "message": (
+                            f"Tool '{tc_name}' executed successfully."
+                        ),
+                    }),
+                }))
+                responded_ids.add(tc_id)
+
+    # Insert in reverse order to preserve indices
+    for insert_idx, tool_msg in reversed(injections):
+        messages.insert(insert_idx, tool_msg)
+
+    return messages
 
 def llm_plan(session) -> dict:
     """
@@ -503,6 +548,7 @@ def llm_plan(session) -> dict:
         messages.insert(0, {"role": "system", "content": dynamic_system})
 
     augmented    = messages + [build_lab_context_message(session)]
+    augmented = _repair_tool_call_chain(augmented)
     tools_schema = build_tools_schema()
 
     # Detect document-related queries to light up the knowledge node

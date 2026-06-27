@@ -22,18 +22,18 @@ export interface Artifact {
 }
 
 export interface ParameterSpec {
-  name:          string;
+  name:           string;
   original_name?: string;
-  min:           number;
-  max:           number;
-  unit:          string;
+  min:            number;
+  max:            number;
+  unit:           string;
   mapped_to_tool?: string;
 }
 
 export interface OperatingCondition {
-  name:        string;
-  values:      number[];
-  unit:        string;
+  name:         string;
+  values:       number[];
+  unit:         string;
   description?: string;
 }
 
@@ -53,22 +53,43 @@ export interface CampaignSpec {
 }
 
 export interface ResultEntry {
-  power_W:            number;
-  X:                  [number, number][];
-  y:                  number[];
-  best_am:            number | null;
-  best_por:           number | null;
-  best_energy:        number | null;
+  // ── Phase 3: general condition fields ──────────────────────────────────────
+  condition_label: string;    // e.g. "power_W", "temperature_C", "ph"
+  condition_value: number;    // the fixed value for this run
+
+  // ── Backward compat ────────────────────────────────────────────────────────
+  power_W: number;            // mirrors condition_value
+
+  // ── BO results ─────────────────────────────────────────────────────────────
+  X:  [number, number][];
+  y:  number[];
+
+  // ── Best observed ──────────────────────────────────────────────────────────
+  best_params:    Record<string, number>;  // general: {param_name: value}
+  best_objective: number | null;           // general field
+  best_energy:    number | null;           // backward compat alias
+
+  // ── Legacy battery-specific best fields ────────────────────────────────────
+  best_am:  number | null;
+  best_por: number | null;
+
+  // ── Diagnostics ────────────────────────────────────────────────────────────
   failed_samples:     number;
   attempts:           number;
   termination_reason: string | null;
+
+  // ── Param names used in this run ───────────────────────────────────────────
+  param_names: string[];
 }
 
 export interface OutstandingTask {
   kind:              string;
-  power_W:           number;
+  condition_label:   string;
+  condition_value:   number;
   remaining_n_calls: number;
-  params:            Record<string, number>;
+  free_params:       Array<{name: string; min: number; max: number; unit: string}>;
+  // backward compat
+  power_W?:          number;
 }
 
 export interface ToolCall {
@@ -83,7 +104,6 @@ export interface Message {
   tool_calls?: ToolCall[];
 }
 
-// Phase 2C: resource log entry for Gantt
 export interface ResourceLogEntry {
   tool:      string;
   day:       number;
@@ -91,7 +111,6 @@ export interface ResourceLogEntry {
   end_min:   number;
 }
 
-// Dynamic metric labels (derived from campaign)
 export interface MetricLabels {
   experiments: string;
   best_result: string;
@@ -127,6 +146,8 @@ export interface SessionState {
   timeline:                   TimelineItem[];
   metric_labels:              MetricLabels;
   resource_log:               ResourceLogEntry[];
+  // Phase 3
+  active_condition_key:       string;
 }
 
 // ── WebSocket Events ──────────────────────────────────────────────────────────

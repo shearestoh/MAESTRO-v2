@@ -5,20 +5,38 @@ import { ResourceSchedule } from "@/components/shared/ResourceSchedule";
 import { MetricCard }       from "@/components/shared/MetricCard";
 import { useMaestroStore }  from "@/store/maestroStore";
 import { Activity, Zap, FlaskConical, AlertTriangle } from "lucide-react";
+import { PlotViewer } from "@/components/shared/PlotViewer";
 
 export function Dashboard() {
   const state  = useMaestroStore((s) => s.state);
+
+  // Dynamic labels — from campaign objective + condition key
+  // Falls back to sensible defaults if no campaign is loaded
   const labels = state?.metric_labels ?? {
     experiments: "Experiments",
-    best_result: "Best Result",
+    best_result: "Best Objective",
     conditions:  "Conditions Run",
     failures:    "Failed Steps",
   };
 
-  const totalEvals   = state?.results_store.reduce((s, r) => s + r.X.length, 0) ?? 0;
-  const totalFails   = state?.results_store.reduce((s, r) => s + r.failed_samples, 0) ?? 0;
-  const bestResult   = state?.results_store.reduce((b, r) => Math.max(b, r.best_energy ?? 0), 0) ?? 0;
-  const activeConditions = state?.results_store.filter((r) => r.X.length > 0).length ?? 0;
+  // ── Aggregate metrics ─────────────────────────────────────────────────────
+  const totalEvals = state?.results_store.reduce(
+    (s, r) => s + r.X.length, 0
+  ) ?? 0;
+
+  const totalFails = state?.results_store.reduce(
+    (s, r) => s + (r.failed_samples ?? 0), 0
+  ) ?? 0;
+
+  // Use best_objective with best_energy fallback for backward compat
+  const bestResult = state?.results_store.reduce(
+    (b, r) => Math.max(b, r.best_objective ?? r.best_energy ?? 0),
+    0,
+  ) ?? 0;
+
+  const activeConditions = state?.results_store.filter(
+    (r) => r.X.length > 0
+  ).length ?? 0;
 
   return (
     <div className="flex flex-col h-full gap-3 p-4 overflow-hidden">
@@ -33,7 +51,7 @@ export function Dashboard() {
         />
         <MetricCard
           label={labels.best_result}
-          value={bestResult > 0 ? bestResult.toFixed(2) : "—"}
+          value={bestResult > 0 ? bestResult.toFixed(4) : "—"}
           icon={Zap}
           accent="green"
         />
@@ -57,7 +75,9 @@ export function Dashboard() {
         {/* Chat */}
         <div className="glass-panel flex flex-col overflow-hidden">
           <div className="px-4 py-2.5 border-b border-slate-700 shrink-0">
-            <h2 className="text-sm font-semibold text-slate-200">Agent Conversation</h2>
+            <h2 className="text-sm font-semibold text-slate-200">
+              Agent Conversation
+            </h2>
             <p className="text-xs text-slate-500">
               Chat with MAESTRO · Upload PDFs · Run campaigns
             </p>
@@ -71,14 +91,15 @@ export function Dashboard() {
         <div className="flex flex-col gap-3 min-h-0">
           <div className="glass-panel flex flex-col flex-1 overflow-hidden">
             <div className="px-4 py-2.5 border-b border-slate-700 shrink-0">
-              <h2 className="text-sm font-semibold text-slate-200">Digital Twin Lab</h2>
+              <h2 className="text-sm font-semibold text-slate-200">
+                Digital Twin Lab
+              </h2>
               <p className="text-xs text-slate-500">Live equipment status</p>
             </div>
             <div className="flex-1 p-2 min-h-0">
               <LabCanvas />
             </div>
           </div>
-          {/* Unified execution log — replaces both LiveEventFeed + ActivityLog */}
           <div className="h-44 shrink-0">
             <ExecutionLog />
           </div>
@@ -86,8 +107,8 @@ export function Dashboard() {
 
         {/* Right panel */}
         <div className="flex flex-col gap-3 overflow-y-auto min-h-0">
-          {/* Phase 2C: Gantt resource schedule replaces simple clock */}
           <ResourceSchedule />
+          <PlotViewer />   
           <CampaignTimeline />
         </div>
       </div>
@@ -111,7 +132,9 @@ function CampaignTimeline() {
         Campaign Progress
       </div>
       {items.length === 0 && (
-        <div className="text-xs text-slate-600 italic">No active campaign.</div>
+        <div className="text-xs text-slate-600 italic">
+          No active campaign.
+        </div>
       )}
       {items.map((item, i) => (
         <div

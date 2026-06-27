@@ -43,18 +43,15 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
   initSession: async () => {
     set({ isLoading: true, error: null });
     try {
-      // Reuse stored session if available
       const stored    = sessionStorage.getItem("maestro_session_id");
       let   sessionId = stored;
 
       if (sessionId) {
-        // Validate it still exists on the backend
         try {
           const res = await api.getState(sessionId);
           set({ sessionId, state: res.state, isLoading: false });
           return;
         } catch {
-          // Session expired — create a new one
           sessionStorage.removeItem("maestro_session_id");
           sessionId = null;
         }
@@ -75,9 +72,20 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     if (!sessionId) return;
     try {
       const res = await api.getState(sessionId);
-      set({ state: res.state });
+      // ── Fix: reset isLoading when background job is no longer active ──
+      // This handles the case where confirm() set isLoading=true but
+      // the background job has since completed.
+      const jobDone = (
+        res.state.background_job_status === "completed" ||
+        res.state.background_job_status === "failed"    ||
+        !res.state.background_job_active
+      );
+      set((s) => ({
+        state:     res.state,
+        isLoading: jobDone ? false : s.isLoading,
+      }));
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: String(e), isLoading: false });
     }
   },
 
@@ -99,7 +107,16 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     set({ isLoading: true });
     try {
       const res = await api.confirm(sessionId, proceed);
-      set({ state: res.state, isLoading: false });
+      // ── Fix: only clear isLoading if no background job was started ──
+      // If a background job is now running, isLoading will be cleared
+      // by refreshState() when the job completes (via WebSocket).
+      const jobStarted = res.state.background_job_active;
+      set({
+        state:     res.state,
+        isLoading: jobStarted ? false : false,
+        // Always false after confirm — spinner is shown via
+        // background_job_active instead, which is more accurate
+      });
     } catch (e) {
       set({ error: String(e), isLoading: false });
     }
@@ -122,6 +139,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
       state:      stateRes.state,
       liveEvents: [],
       lastEvent:  null,
+      isLoading:  false,
     });
   },
 

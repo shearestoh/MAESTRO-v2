@@ -2,7 +2,11 @@ import { useState, useRef } from "react";
 import { useMaestroStore }  from "@/store/maestroStore";
 import { api }              from "@/lib/api";
 import { cn }               from "@/lib/utils";
-import { Upload, FileText, CheckCircle2, Loader2, ChevronDown, ChevronRight } from "lucide-react";
+import {
+  Upload, FileText, CheckCircle2,
+  Loader2, ChevronDown, ChevronRight,
+} from "lucide-react";
+import type { ResultEntry } from "@/types";
 
 export function Campaign() {
   const sessionId    = useMaestroStore((s) => s.sessionId);
@@ -18,6 +22,8 @@ export function Campaign() {
 
   const campaign = state?.extracted_campaign;
   const results  = state?.results_store ?? [];
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
 
   const handleFile = async (file: File) => {
     if (!sessionId) return;
@@ -35,15 +41,33 @@ export function Campaign() {
     if (!sessionId || !state?.active_document_id) return;
     setExtracting(true);
     try {
-      await api.extractCaseStudy(sessionId, state.active_document_id, caseName);
+      await api.extractCaseStudy(
+        sessionId, state.active_document_id, caseName
+      );
       await refreshState();
     } finally {
       setExtracting(false);
     }
   };
 
+  // ── Condition display helper ───────────────────────────────────────────────
+  // Uses general fields with power_W fallback for backward compat
+
+  const getConditionLabel = (r: ResultEntry): string => {
+    const label = r.condition_label || "power_W";
+    const value = r.condition_value  ?? r.power_W ?? 0;
+    return `${label} = ${value}`;
+  };
+
+  const getBestObjective = (r: ResultEntry): number | null =>
+    r.best_objective ?? r.best_energy ?? null;
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
   return (
     <div className="flex flex-col h-full p-4 gap-4 overflow-y-auto">
+
+      {/* Header */}
       <div>
         <h1 className="text-lg font-bold text-slate-100">Campaign</h1>
         <p className="text-xs text-slate-500">
@@ -53,8 +77,9 @@ export function Campaign() {
 
       <div className="grid grid-cols-2 gap-4">
 
-        {/* Left: Paper upload + extraction */}
+        {/* ── Left: Paper upload + extraction ── */}
         <div className="space-y-4">
+
           {/* PDF Upload */}
           <div
             onDrop={(e) => {
@@ -67,7 +92,8 @@ export function Campaign() {
             onDragLeave={() => setDragOver(false)}
             onClick={() => fileRef.current?.click()}
             className={cn(
-              "glass-panel p-6 flex flex-col items-center gap-3 cursor-pointer transition-colors",
+              "glass-panel p-6 flex flex-col items-center gap-3",
+              "cursor-pointer transition-colors",
               dragOver
                 ? "border-blue-500 bg-blue-500/5"
                 : "hover:border-blue-500/50",
@@ -78,7 +104,10 @@ export function Campaign() {
               type="file"
               accept=".pdf"
               className="hidden"
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleFile(f);
+              }}
             />
             {uploading ? (
               <Loader2 size={28} className="text-blue-400 animate-spin" />
@@ -111,12 +140,20 @@ export function Campaign() {
                 value={caseName}
                 onChange={(e) => setCaseName(e.target.value)}
                 placeholder="e.g. Case Study 2, Figure 3 experiment..."
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                className={cn(
+                  "w-full bg-slate-900 border border-slate-700 rounded-lg",
+                  "px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600",
+                  "focus:outline-none focus:border-blue-500",
+                )}
               />
               <button
                 onClick={handleExtract}
                 disabled={extracting || !caseName.trim()}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-500 transition-colors disabled:opacity-50"
+                className={cn(
+                  "w-full flex items-center justify-center gap-2 px-4 py-2",
+                  "rounded-lg bg-blue-600 text-white text-sm font-medium",
+                  "hover:bg-blue-500 transition-colors disabled:opacity-50",
+                )}
               >
                 {extracting
                   ? <Loader2 size={14} className="animate-spin" />
@@ -130,25 +167,35 @@ export function Campaign() {
           )}
         </div>
 
-        {/* Right: Campaign spec + results */}
+        {/* ── Right: Campaign spec ── */}
         <div className="space-y-4">
           {campaign ? (
             <>
-              {/* Campaign spec */}
+              {/* Campaign spec card */}
               <div className="glass-panel p-4 space-y-3 border-green-500/30 border">
                 <div className="flex items-center gap-2 text-green-400 text-xs font-semibold uppercase tracking-wider">
                   <CheckCircle2 size={11} /> Campaign Extracted
                 </div>
-                <div className="text-base font-bold text-slate-100">{campaign.title}</div>
-                <div className="text-xs text-slate-400">{campaign.target_case_study}</div>
-
-                <div className="space-y-1 text-xs">
-                  <div className="text-slate-500 font-semibold">Objective</div>
-                  <div className="text-blue-400 font-mono">{campaign.objective_metric}</div>
+                <div className="text-base font-bold text-slate-100">
+                  {campaign.title}
+                </div>
+                <div className="text-xs text-slate-400">
+                  {campaign.target_case_study}
                 </div>
 
+                {/* Objective */}
                 <div className="space-y-1 text-xs">
-                  <div className="text-slate-500 font-semibold">Parameters</div>
+                  <div className="text-slate-500 font-semibold">Objective</div>
+                  <div className="text-blue-400 font-mono">
+                    {campaign.objective_metric}
+                  </div>
+                </div>
+
+                {/* Free parameters */}
+                <div className="space-y-1 text-xs">
+                  <div className="text-slate-500 font-semibold">
+                    Free Parameters (BO search space)
+                  </div>
                   {campaign.parameter_space.map((p) => (
                     <div key={p.name} className="flex justify-between">
                       <span className="text-slate-400">{p.name}</span>
@@ -159,8 +206,31 @@ export function Campaign() {
                   ))}
                 </div>
 
+                {/* Operating conditions */}
+                {campaign.operating_conditions.length > 0 && (
+                  <div className="space-y-1 text-xs">
+                    <div className="text-slate-500 font-semibold">
+                      Operating Conditions (separate runs)
+                    </div>
+                    {campaign.operating_conditions.map((oc) => (
+                      <div key={oc.name} className="flex justify-between">
+                        <span className="text-slate-400">{oc.name}</span>
+                        <span className="font-mono text-slate-200">
+                          {oc.values.join(", ")} {oc.unit}
+                          <span className="text-slate-500 ml-1">
+                            ({oc.values.length} runs)
+                          </span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Feasibility */}
                 <div className="text-xs">
-                  <div className="text-slate-500 font-semibold mb-1">Feasibility</div>
+                  <div className="text-slate-500 font-semibold mb-1">
+                    Feasibility
+                  </div>
                   <div className={
                     campaign.capability_match?.feasible
                       ? "text-green-400"
@@ -177,7 +247,9 @@ export function Campaign() {
                   onClick={() => setShowSpec(!showSpec)}
                   className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300 transition-colors"
                 >
-                  {showSpec ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                  {showSpec
+                    ? <ChevronDown size={12} />
+                    : <ChevronRight size={12} />}
                   {showSpec ? "Hide" : "Show"} full spec
                 </button>
                 {showSpec && (
@@ -216,44 +288,73 @@ export function Campaign() {
         </div>
       </div>
 
-      {/* Results section */}
+      {/* ── Results section ── */}
       {results.length > 0 && (
         <div>
           <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
             Experimental Results
+            {state?.active_condition_key && (
+              <span className="ml-2 text-slate-600 normal-case font-normal">
+                — varying {state.active_condition_key}
+              </span>
+            )}
           </div>
           <div className="grid grid-cols-3 gap-3">
-            {results.map((r) => (
-              <div key={r.power_W} className="glass-panel p-3 space-y-2">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm font-bold text-slate-100">
-                    Condition {r.power_W}
-                  </span>
-                  <span className={cn(
-                    "text-xs px-2 py-0.5 rounded-full",
-                    r.X.length > 0
-                      ? "bg-green-500/20 text-green-400"
-                      : "bg-slate-700 text-slate-500",
-                  )}>
-                    {r.X.length} evals
-                  </span>
-                </div>
-                {r.best_energy !== null && (
-                  <div className="text-xs text-slate-400">
-                    Best:{" "}
-                    <span className="text-green-400 font-mono">
-                      {r.best_energy.toFixed(2)}
+            {results.map((r, idx) => {
+              const condLabel   = getConditionLabel(r);
+              const bestObj     = getBestObjective(r);
+              const objMetric   = campaign?.objective_metric ?? "objective";
+              const nEvals      = r.X.length;
+              const progressPct = Math.min(100, (nEvals / 20) * 100);
+
+              return (
+                <div key={idx} className="glass-panel p-3 space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm font-bold text-slate-100 truncate">
+                      {condLabel}
+                    </span>
+                    <span className={cn(
+                      "text-xs px-2 py-0.5 rounded-full shrink-0",
+                      nEvals > 0
+                        ? "bg-green-500/20 text-green-400"
+                        : "bg-slate-700 text-slate-500",
+                    )}>
+                      {nEvals} evals
                     </span>
                   </div>
-                )}
-                <div className="w-full h-1 bg-slate-700 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 transition-all"
-                    style={{ width: `${Math.min(100, (r.X.length / 20) * 100)}%` }}
-                  />
+
+                  {bestObj !== null && (
+                    <div className="text-xs text-slate-400">
+                      Best {objMetric}:{" "}
+                      <span className="text-green-400 font-mono">
+                        {bestObj.toFixed(4)}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Best params summary */}
+                  {r.best_params && Object.keys(r.best_params).length > 0 && (
+                    <div className="text-[10px] text-slate-600 space-y-0.5">
+                      {Object.entries(r.best_params).map(([k, v]) => (
+                        <div key={k} className="flex justify-between">
+                          <span>{k}</span>
+                          <span className="font-mono text-slate-500">
+                            {typeof v === "number" ? v.toFixed(2) : v}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="w-full h-1 bg-slate-700 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 transition-all"
+                      style={{ width: `${progressPct}%` }}
+                    />
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
