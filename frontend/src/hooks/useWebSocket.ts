@@ -11,17 +11,16 @@ export function useWebSocket() {
   const setConnected = useMaestroStore((s) => s.setWsConnected);
   const refreshState = useMaestroStore((s) => s.refreshState);
 
-  const wsRef        = useRef<WebSocket | null>(null);
-  const reconnects   = useRef(0);
-  const timerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const mounted      = useRef(true);
+  const wsRef      = useRef<WebSocket | null>(null);
+  const reconnects = useRef(0);
+  const timerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mounted    = useRef(true);
 
   const connect = useCallback(() => {
     if (!sessionId || !mounted.current) return;
 
-    // Build WS URL — works with the Vite proxy
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const host     = window.location.host; // e.g. localhost:3000
+    const host     = window.location.host;
     const url      = `${protocol}://${host}/ws/${sessionId}`;
 
     const ws = new WebSocket(url);
@@ -41,10 +40,25 @@ export function useWebSocket() {
           pushWsEvent(event);
         }
 
-        // Refresh on state_update (fires after every lab event)
+        // Refresh on state_update
         if (event.event_type === "state_update") {
           refreshState();
+
           const payload = event.payload as Record<string, unknown>;
+
+          // ── Fix: job_complete flag triggers immediate + delayed refresh ──
+          // This ensures the spinner clears and timeline updates correctly
+          // even if the background thread sets state slightly after the
+          // WebSocket tick.
+          if (payload.job_complete === true) {
+            // Immediate refresh
+            refreshState();
+            // Delayed refresh — catches any state written after job_complete
+            setTimeout(() => refreshState(), 300);
+            setTimeout(() => refreshState(), 800);
+          }
+
+          // Legacy: completed status check
           if (
             payload.background_job_active === false &&
             payload.background_job_status === "completed"
@@ -53,11 +67,7 @@ export function useWebSocket() {
           }
         }
 
-        // ALSO refresh immediately on any equipment event
-        // This is the belt-and-braces fix for node lighting:
-        // state_update fires 80ms after the equipment event,
-        // by which time equipment_status may already be reset.
-        // Refreshing on the equipment event itself catches it while still True.
+        // Refresh on equipment events (node lighting)
         if (event.equipment !== null && event.equipment !== undefined) {
           refreshState();
         }

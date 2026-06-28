@@ -2,16 +2,14 @@ import { AgentChat }        from "@/components/agent/AgentChat";
 import { LabCanvas }        from "@/components/digital-twin/LabCanvas";
 import { ExecutionLog }     from "@/components/shared/ExecutionLog";
 import { ResourceSchedule } from "@/components/shared/ResourceSchedule";
+import { PlotViewer }       from "@/components/shared/PlotViewer";
 import { MetricCard }       from "@/components/shared/MetricCard";
 import { useMaestroStore }  from "@/store/maestroStore";
 import { Activity, Zap, FlaskConical, AlertTriangle } from "lucide-react";
-import { PlotViewer } from "@/components/shared/PlotViewer";
 
 export function Dashboard() {
   const state  = useMaestroStore((s) => s.state);
 
-  // Dynamic labels — from campaign objective + condition key
-  // Falls back to sensible defaults if no campaign is loaded
   const labels = state?.metric_labels ?? {
     experiments: "Experiments",
     best_result: "Best Objective",
@@ -19,7 +17,6 @@ export function Dashboard() {
     failures:    "Failed Steps",
   };
 
-  // ── Aggregate metrics ─────────────────────────────────────────────────────
   const totalEvals = state?.results_store.reduce(
     (s, r) => s + r.X.length, 0
   ) ?? 0;
@@ -28,10 +25,8 @@ export function Dashboard() {
     (s, r) => s + (r.failed_samples ?? 0), 0
   ) ?? 0;
 
-  // Use best_objective with best_energy fallback for backward compat
   const bestResult = state?.results_store.reduce(
-    (b, r) => Math.max(b, r.best_objective ?? r.best_energy ?? 0),
-    0,
+    (b, r) => Math.max(b, r.best_objective ?? r.best_energy ?? 0), 0
   ) ?? 0;
 
   const activeConditions = state?.results_store.filter(
@@ -41,7 +36,7 @@ export function Dashboard() {
   return (
     <div className="flex flex-col h-full gap-3 p-4 overflow-hidden">
 
-      {/* Dynamic metric row */}
+      {/* Metric row */}
       <div className="grid grid-cols-4 gap-3 shrink-0">
         <MetricCard
           label={labels.experiments}
@@ -72,29 +67,25 @@ export function Dashboard() {
       {/* Main 3-column layout */}
       <div className="flex-1 grid grid-cols-[1fr_1fr_280px] gap-3 min-h-0">
 
-        {/* Chat */}
+        {/* Chat — renamed, no sub-description */}
         <div className="glass-panel flex flex-col overflow-hidden">
           <div className="px-4 py-2.5 border-b border-slate-700 shrink-0">
             <h2 className="text-sm font-semibold text-slate-200">
-              Agent Conversation
+              Chat with MAESTRO
             </h2>
-            <p className="text-xs text-slate-500">
-              Chat with MAESTRO · Upload PDFs · Run campaigns
-            </p>
           </div>
           <div className="flex-1 overflow-hidden">
             <AgentChat />
           </div>
         </div>
 
-        {/* Digital Twin + Execution Log */}
+        {/* Digital Lab — renamed, no sub-description */}
         <div className="flex flex-col gap-3 min-h-0">
           <div className="glass-panel flex flex-col flex-1 overflow-hidden">
             <div className="px-4 py-2.5 border-b border-slate-700 shrink-0">
               <h2 className="text-sm font-semibold text-slate-200">
-                Digital Twin Lab
+                Digital Lab
               </h2>
-              <p className="text-xs text-slate-500">Live equipment status</p>
             </div>
             <div className="flex-1 p-2 min-h-0">
               <LabCanvas />
@@ -108,7 +99,7 @@ export function Dashboard() {
         {/* Right panel */}
         <div className="flex flex-col gap-3 overflow-y-auto min-h-0">
           <ResourceSchedule />
-          <PlotViewer />   
+          <PlotViewer />
           <CampaignTimeline />
         </div>
       </div>

@@ -390,7 +390,8 @@ def get_tool(tool_id: str):
 def serve_plot(session_id: str):
     """
     Serve the most recently generated summary plot for a session.
-    The frontend polls this after the plotter job completes.
+    Rendered inline in the chat via markdown image syntax.
+    Also used by PlotViewer thumbnail in the right panel.
     """
     try:
         session = get_session(session_id)
@@ -403,7 +404,11 @@ def serve_plot(session_id: str):
     if not os.path.exists(path):
         raise HTTPException(404, "Plot file not found on disk")
 
-    return FileResponse(path, media_type="image/png")
+    return FileResponse(
+        path,
+        media_type="image/png",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 # ── Exports ───────────────────────────────────────────────────────────────────

@@ -295,12 +295,7 @@ def _run_background_job(session_id: str):
             session.current_activity       = None
             session.equipment_status       = EquipmentStatusModel()
 
-            # ── Inject tool response messages for all background tool calls ───
-            # OpenAI requires: assistant[tool_calls] → tool[response]
-            # The background job runs after confirm_pending() already cleared
-            # pending_tool_calls, so we scan message history for any
-            # assistant messages with tool_calls that have no matching
-            # tool response yet.
+            # Repair orphaned tool call chains
             _inject_missing_tool_responses(session)
 
             if not success:
@@ -340,21 +335,60 @@ def _run_background_job(session_id: str):
                     if r.get("X")
                 ]
 
-                session.agent_state.messages.append({
-                    "role":    "assistant",
-                    "content": (
-                        f"✅ **Workflow complete.**\n\n"
-                        f"| Metric | Value |\n"
-                        f"|--------|-------|\n"
-                        f"| Experiments run | {n_evals} |\n"
-                        f"| Best {obj_label} | {best_obj:.4f} |\n"
-                        f"| Failed steps | {n_fails} |\n"
-                        f"| Conditions completed | "
-                        f"{', '.join(conds_done) or 'none'} |\n\n"
-                        f"Ask me to **generate a summary figure**, "
-                        f"**analyse the results**, or **continue tomorrow**."
-                    ),
-                })
+                # ── Check if this was a plotter job ───────────────────────────
+                is_plotter_job = any(
+                    step.get("kind") == "plotter"
+                    for step in session.background_job_plan
+                )
+
+                if is_plotter_job and session.show_plotter_image:
+                    # Option C: plot image as a separate assistant message
+                    # The plot is served via /api/plot/{session_id}
+                    session.agent_state.messages.append({
+                        "role":    "assistant",
+                        "content": (
+                            "Here is the optimisation summary figure:\n\n"
+                            f"![Optimisation Summary]"
+                            f"(/api/plot/{session.session_id})\n\n"
+                            f"The figure shows the parameter space explored "
+                            f"at each operating condition, with the optimal "
+                            f"parameter path in the final panel. "
+                            f"Ask me to analyse the results or continue tomorrow."
+                        ),
+                    })
+                else:
+                    # Standard workflow completion message
+                    session.agent_state.messages.append({
+                        "role":    "assistant",
+                        "content": (
+                            f"✅ **Workflow complete.**\n\n"
+                            f"| Metric | Value |\n"
+                            f"|--------|-------|\n"
+                            f"| Experiments run | {n_evals} |\n"
+                            f"| Best {obj_label} | {best_obj:.4f} |\n"
+                            f"| Failed steps | {n_fails} |\n"
+                            f"| Conditions completed | "
+                            f"{', '.join(conds_done) or 'none'} |\n\n"
+                            f"Ask me to **generate a summary figure**, "
+                            f"**analyse the results**, or **continue tomorrow**."
+                        ),
+                    })
+
+            # ── Final state_update event to unblock frontend spinner ──────────
+            # This ensures the WebSocket sends one last state_update after
+            # background_job_active is set to False, so the frontend
+            # refreshState() call sees the completed status and clears
+            # any lingering loading indicators.
+            session.live_event_queue.append(ExecutionEvent(
+                event_type="job_complete",
+                message="Job finished.",
+                equipment=None,
+                category="system",
+                payload={
+                    "background_job_active": False,
+                    "background_job_status": session.background_job_status,
+                },
+            ))
 
     try:
         while True:

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useMaestroStore } from "@/store/maestroStore";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { Send, Paperclip, CheckCircle2, XCircle, Loader2 } from "lucide-react";
+import { Send, Paperclip, CheckCircle2, XCircle, Loader2, Zap, User } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Message, ToolCall } from "@/types";
 
@@ -16,8 +16,8 @@ export function AgentChat() {
 
   const [input,     setInput]     = useState("");
   const [uploading, setUploading] = useState(false);
-  const fileRef  = useRef<HTMLInputElement>(null);
-  const bottomRef= useRef<HTMLDivElement>(null);
+  const fileRef   = useRef<HTMLInputElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
 
   const messages: Message[] = (state?.messages ?? []).filter(
     (m) => m.role !== "system" && m.role !== "tool"
@@ -56,6 +56,7 @@ export function AgentChat() {
 
   return (
     <div className="flex flex-col h-full">
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && (
@@ -65,24 +66,30 @@ export function AgentChat() {
         )}
 
         {messages.map((msg, i) => (
-          <MessageBubble key={i} message={msg} />
+          <MessageBubble key={i} message={msg} sessionId={sessionId} />
         ))}
 
         {/* Working indicator */}
         {state?.background_job_active && state.current_activity && (
           <div className="flex items-start gap-3 animate-fade-in">
-            <div className="w-8 h-8 rounded-full bg-blue-500/20 border border-blue-500/40 flex items-center justify-center shrink-0">
-              <Loader2 size={14} className="text-blue-400 animate-spin" />
-            </div>
+            <AgentAvatar />
             <div className="glass-panel px-4 py-3 max-w-[85%]">
-              <div className="text-xs text-blue-400 font-semibold mb-1">MAESTRO is working</div>
-              <div className="text-sm text-slate-400">{state.current_activity}</div>
+              <div className="text-xs text-blue-400 font-semibold mb-1">
+                MAESTRO is working
+              </div>
+              <div className="text-sm text-slate-400">
+                {state.current_activity}
+              </div>
               {state.background_job_plan_length > 0 && (
                 <div className="mt-2 w-full h-1 bg-slate-700 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-blue-500 transition-all duration-500"
                     style={{
-                      width: `${(state.background_job_index / state.background_job_plan_length) * 100}%`,
+                      width: `${Math.min(
+                        100,
+                        (state.background_job_index /
+                          state.background_job_plan_length) * 100
+                      )}%`,
                     }}
                   />
                 </div>
@@ -105,7 +112,6 @@ export function AgentChat() {
 
       {/* Input area */}
       <div className="border-t border-slate-700 p-3 space-y-2 shrink-0">
-        {/* File upload */}
         <div className="flex items-center gap-2">
           <input
             ref={fileRef}
@@ -120,7 +126,7 @@ export function AgentChat() {
             className={cn(
               "flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors",
               "border-slate-700 text-slate-400 hover:border-blue-500 hover:text-blue-400",
-              uploading && "opacity-50 cursor-not-allowed"
+              uploading && "opacity-50 cursor-not-allowed",
             )}
           >
             {uploading
@@ -136,18 +142,17 @@ export function AgentChat() {
           )}
         </div>
 
-        {/* Text input */}
         <div className="flex gap-2">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Describe your scientific objective, ask MAESTRO to run a campaign..."
+            placeholder="Describe your scientific objective or ask MAESTRO..."
             rows={2}
             className={cn(
               "flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2",
               "text-sm text-slate-200 placeholder:text-slate-600",
-              "resize-none focus:outline-none focus:border-blue-500 transition-colors"
+              "resize-none focus:outline-none focus:border-blue-500 transition-colors",
             )}
           />
           <button
@@ -157,7 +162,7 @@ export function AgentChat() {
               "px-4 py-2 rounded-lg bg-blue-600 text-white font-medium text-sm",
               "hover:bg-blue-500 transition-colors",
               "disabled:opacity-40 disabled:cursor-not-allowed",
-              "flex items-center gap-2 shrink-0"
+              "flex items-center gap-2 shrink-0",
             )}
           >
             {isLoading
@@ -170,35 +175,79 @@ export function AgentChat() {
   );
 }
 
+// ── Avatars ───────────────────────────────────────────────────────────────────
+
+function AgentAvatar() {
+  return (
+    <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center shrink-0 shadow-lg shadow-blue-500/20">
+      <Zap size={14} className="text-white" />
+    </div>
+  );
+}
+
+function UserAvatar() {
+  return (
+    <div className="w-8 h-8 rounded-full bg-slate-700 border border-slate-600 flex items-center justify-center shrink-0">
+      <User size={14} className="text-slate-300" />
+    </div>
+  );
+}
+
 // ── Message Bubble ────────────────────────────────────────────────────────────
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({
+  message,
+  sessionId,
+}: {
+  message:   Message;
+  sessionId: string | null;
+}) {
   const isUser = message.role === "user";
 
   return (
     <div className={cn(
       "flex items-start gap-3 animate-slide-up",
-      isUser && "flex-row-reverse"
+      isUser && "flex-row-reverse",
     )}>
-      <div className={cn(
-        "w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-xs font-bold",
-        isUser
-          ? "bg-blue-500/20 border border-blue-500/40 text-blue-400"
-          : "bg-green-500/20 border border-green-500/40 text-green-400"
-      )}>
-        {isUser ? "YOU" : "M"}
-      </div>
+      {isUser ? <UserAvatar /> : <AgentAvatar />}
 
       <div className={cn(
         "max-w-[80%] rounded-xl px-4 py-3 text-sm leading-relaxed",
         isUser
           ? "bg-blue-500/10 border border-blue-500/20 text-slate-200"
-          : "glass-panel text-slate-200"
+          : "glass-panel text-slate-200",
       )}>
         {message.content ? (
           <ReactMarkdown
             components={{
-              p:      ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+              // ── Images: render inline (paper figures + plot) ───────────
+              img: ({ src, alt }) => {
+                // Resolve relative API paths
+                const resolvedSrc = src?.startsWith("/api")
+                  ? src
+                  : src;
+                return (
+                  <span className="block my-3">
+                    <img
+                      src={resolvedSrc}
+                      alt={alt ?? "Figure"}
+                      className="rounded-lg border border-slate-700 max-w-full h-auto"
+                      onError={(e) => {
+                        // Hide broken images gracefully
+                        (e.target as HTMLImageElement).style.display = "none";
+                      }}
+                    />
+                    {alt && alt !== "Figure" && (
+                      <span className="block text-xs text-slate-500 mt-1 italic">
+                        {alt}
+                      </span>
+                    )}
+                  </span>
+                );
+              },
+              p:      ({ children }) => (
+                <p className="mb-2 last:mb-0">{children}</p>
+              ),
               code:   ({ children }) => (
                 <code className="bg-slate-900 px-1.5 py-0.5 rounded text-xs font-mono text-blue-400">
                   {children}
@@ -210,17 +259,42 @@ function MessageBubble({ message }: { message: Message }) {
                 </pre>
               ),
               strong: ({ children }) => (
-                <strong className="text-blue-400 font-semibold">{children}</strong>
+                <strong className="text-blue-400 font-semibold">
+                  {children}
+                </strong>
               ),
-              ul: ({ children }) => <ul className="list-disc list-inside space-y-1 mb-2">{children}</ul>,
-              li: ({ children }) => <li className="text-slate-300">{children}</li>,
+              ul: ({ children }) => (
+                <ul className="list-disc list-inside space-y-1 mb-2">
+                  {children}
+                </ul>
+              ),
+              li: ({ children }) => (
+                <li className="text-slate-300">{children}</li>
+              ),
+              table: ({ children }) => (
+                <table className="w-full text-xs border-collapse mt-2 mb-2">
+                  {children}
+                </table>
+              ),
+              th: ({ children }) => (
+                <th className="border border-slate-700 px-2 py-1 text-left text-slate-300 bg-slate-800">
+                  {children}
+                </th>
+              ),
+              td: ({ children }) => (
+                <td className="border border-slate-700 px-2 py-1 text-slate-400">
+                  {children}
+                </td>
+              ),
             }}
           >
             {message.content}
           </ReactMarkdown>
         ) : (
           <span className="text-slate-500 italic text-xs">
-            {message.tool_calls?.map((tc) => `[calling ${tc.function.name}]`).join(", ")}
+            {message.tool_calls
+              ?.map((tc) => `[calling ${tc.function.name}]`)
+              .join(", ")}
           </span>
         )}
       </div>
@@ -268,7 +342,7 @@ function ConfirmationPanel({
           onClick={onConfirm}
           className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-green-500/20 border border-green-500/40 text-green-400 text-sm font-medium hover:bg-green-500/30 transition-colors"
         >
-          <CheckCircle2 size={14} /> Approve & Run
+          <CheckCircle2 size={14} /> Approve &amp; Run
         </button>
         <button
           onClick={onAbort}
