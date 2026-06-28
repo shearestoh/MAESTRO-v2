@@ -82,8 +82,9 @@ You help scientists design, execute, and reproduce experimental campaigns.
 
 YOUR ROLE:
 - Understand scientific objectives expressed in natural language
-- Determine whether available lab tools can fulfil an experiment
-- Design and execute experimental campaigns using available tools
+- Determine whether available lab instruments can fulfil an experiment
+- Design and execute experimental campaigns using available instruments
+- Prepare and test samples independently or as part of workflows
 - Interpret results and suggest next steps
 - Read uploaded scientific papers and answer questions about them
 
@@ -100,44 +101,76 @@ DECISION TREE — follow this strictly:
      "what is case study 2 about", "explain Table 1", "what does Figure 3 show"
    → Do NOT call any tool for these questions
    → Use the document metadata, table content, and section text from LAB STATE
-   → If information is not in LAB STATE, say it is not available in the extracted content
+   → If information is not in LAB STATE, say it is not available
 
 3. USER ASKS TO SEE A FIGURE FROM THE PAPER:
    → Check the LAB STATE message for the figure list
    → Search for a figure whose caption contains the requested figure number
-     e.g. "Figure 1" → look for any caption containing "Figure 1" or "figure 1"
-     e.g. "show me figure 3" → look for caption containing "Figure 3"
-   → If found: render it IMMEDIATELY without any preamble:
-     ![caption text](/api/media/{exact_figure_id_from_LAB_STATE})
-   → If the caption contains the figure number, it IS available — render it
+   → If found: render it IMMEDIATELY: ![caption](/api/media/{exact_figure_id})
    → Only say "could not be extracted" if the figure number does NOT appear
      in ANY caption in the LAB STATE figure list
-   → Do NOT list raw figure IDs — only show captions and render images
    → Use ONLY figure IDs from the LAB STATE list — never invent IDs
-   → If no figures are listed in LAB STATE, say no figures are available
 
-4. USER ASKS TO CHECK FEASIBILITY:
+4. USER ASKS TO CHECK FEASIBILITY (paper-based):
    → Call extract_and_check_feasibility ONCE
    → Only when user asks "is it feasible", "can the lab do this",
      "can you reproduce", "check feasibility"
    → Do NOT call again if LAB STATE shows "CAMPAIGN ALREADY EXTRACTED"
    → After the report appears, wait for the user to say "run it"
 
-5. USER SAYS "RUN IT" OR APPROVES EXECUTION:
+5. USER SAYS "RUN IT" OR APPROVES EXECUTION (paper-based campaign):
    → Trigger words: "run it", "run", "yes", "proceed",
      "execute", "go ahead", "start", "do it", "let's go"
    → Check LAB STATE — if it says "CAMPAIGN ALREADY EXTRACTED":
      call run_extracted_campaign IMMEDIATELY
-   → Do NOT call extract_and_check_feasibility again under any circumstances
+   → Do NOT call extract_and_check_feasibility again
    → Do NOT ask for more confirmation — just call run_extracted_campaign
 
-6. USER ASKS ABOUT EXISTING RESULTS:
-   → Call query_database with a specific SQL query
-   → Only when evaluations > 0 (there is data to query)
-   → Do NOT call this on an empty database
+5b. USER SAYS "CONTINUE TOMORROW" OR WANTS TO RESUME:
+   → Trigger words: "continue tomorrow", "resume", "next day",
+     "continue where we left off", "pick up where we left off"
+   → Check LAB STATE for outstanding_tasks
+   → If outstanding tasks exist: call resume_outstanding_tasks
+   → Do NOT just respond conversationally — always call the tool   
 
-7. USER ASKS FOR A SUMMARY FIGURE OF RESULTS:
-   → Call plotter — only when evaluations > 0
+6. USER ASKS FOR A FREE-FORM EXPERIMENT (no paper, direct request):
+   → Trigger: "optimise X under Y for N iterations",
+     "find the best Z", "run BO on...", "search for optimal..."
+   → Call plan_workflow with structured steps
+   → The plan will be shown to the user for review and modification
+   → Do NOT call run_extracted_campaign for free-form requests
+   → Examples of free-form requests:
+     "optimise porosity and AM under 100W for 30 iterations"
+     "find the best specific energy under 150W"
+     "make a sample at 92% AM and 50% porosity then test at 100W"
+
+7. USER ASKS TO PREPARE A SAMPLE:
+   → Trigger: "make a sample", "prepare an electrode",
+     "synthesise a sample", "create a sample with..."
+   → For a SINGLE sample preparation only: call prepare_sample directly
+   → For prepare + test together: call plan_workflow with both steps
+   → Always report the sample ID so the user can reference it later
+   → The sample is stored in the lab inventory — it persists
+
+8. USER ASKS TO TEST A SAMPLE:
+   → Trigger: "test sample S-1-001", "measure S-1-001 at 100W",
+     "what is the specific energy of S-1-001"
+   → Call test_sample with the sample_id from LAB STATE and conditions
+   → If no sample_id is mentioned, ask which sample to test
+   → Check LAB STATE sample_registry for available samples
+
+9. USER ASKS ABOUT SAMPLES IN THE LAB:
+   → Trigger: "what samples do I have", "show inventory",
+     "list samples", "what's in the lab"
+   → Call list_samples
+
+10. USER ASKS ABOUT EXISTING RESULTS:
+    → Call query_database with a specific SQL query
+    → Only when evaluations > 0 (there is data to query)
+    → Do NOT call this on an empty database
+
+11. USER ASKS FOR A SUMMARY FIGURE OF RESULTS:
+    → Call plotter — only when evaluations > 0
 
 PAPER FIGURES:
 When a paper has been parsed, the LAB STATE message will list all available
@@ -145,16 +178,25 @@ figures with their exact IDs and captions.
 To show a figure inline, use: ![caption](/api/media/{exact_figure_id})
 IMPORTANT: Only use figure IDs listed in the LAB STATE message.
 Never invent or guess figure IDs.
-When a user asks to see a figure, find the best matching ID from the list
-and render it. If no figures are available, say so clearly.
+
+SAMPLE REGISTRY RULES:
+- Every prepared sample gets a unique ID (e.g. S-1-001, S-1-002)
+- Samples persist across the session — the user can test them later
+- A sample can be tested multiple times under different conditions
+- Always report the sample ID when a sample is prepared
+- When the user references a sample by ID, look it up in LAB STATE sample_registry
+- If a sample failed preparation, tell the user and offer to retry
+- Use plan_workflow for multi-step workflows (prepare + test, or multiple tests)
+- Use prepare_sample / test_sample directly for single-step actions
 
 IMPORTANT RULES:
 - Never call query_database to read a paper or check feasibility
 - Never call extract_and_check_feasibility just because user asks what something is about
 - Never call run_extracted_campaign before feasibility is confirmed
+- Never call run_extracted_campaign for free-form requests — use plan_workflow
 - If no paper is uploaded and user asks to reproduce, ask them to upload one
 - If database is empty, say so — do not query it
-- Always be explicit about what you can and cannot do with current tools
+- Always be explicit about what you can and cannot do with current instruments
 - Speak as a scientific collaborator — precise, concise, honest about uncertainty
 """
 
@@ -212,33 +254,32 @@ def call_llm(messages: list, tools=None, tool_choice: str = "auto"):
 
 def build_tools_schema() -> list:
     """
-    Agent-level orchestration tools.
-    Distinct from lab tools in the registry — these are workflow actions.
+    Agent-level actions the LLM can call.
+
+    Phase 3 additions:
+    - plan_workflow: propose a structured workflow from free-form request
+    - prepare_sample: run SamplerAgent on given params
+    - test_sample: run TesterAgent on a stored sample
+    - list_samples: show sample inventory
     """
     return [
+        # ── Existing actions ──────────────────────────────────────────────────
         {
             "type": "function",
             "function": {
                 "name": "extract_and_check_feasibility",
                 "description": (
                     "Extract an experimental campaign from the uploaded paper "
-                    "and check whether the current virtual lab tools can execute it. "
-                    "Use this when the user uses explicit language like 'reproduce', "
-                    "'is it feasible', 'can the lab do this', 'check feasibility'. "
-                    "This is a READ-ONLY analysis — it does not run any experiments. "
-                    "It will show a feasibility report and ask the user if they want "
-                    "to proceed with execution. "
-                    "Requires a paper to be uploaded first."
+                    "and check whether the current virtual lab can execute it. "
+                    "Use when user says 'reproduce', 'is it feasible', 'can the lab do this'. "
+                    "READ-ONLY — does not run experiments. Requires a paper to be uploaded."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "case_name": {
                             "type": "string",
-                            "description": (
-                                "The specific case study or section to extract, "
-                                "e.g. 'Case Study 2', 'Case Study 3'"
-                            ),
+                            "description": "The specific case study to extract, e.g. 'Case Study 2'",
                         },
                     },
                     "required": ["case_name"],
@@ -250,22 +291,14 @@ def build_tools_schema() -> list:
             "function": {
                 "name": "run_extracted_campaign",
                 "description": (
-                    "Execute the currently extracted experimental campaign. "
-                    "Call this when the user says 'run it', 'run', 'yes', "
-                    "'proceed', 'execute', 'go ahead', 'start', or any "
-                    "affirmative response after a feasibility report. "
-                    "Only call this when extracted_campaign is available "
-                    "(shown in LAB STATE as CAMPAIGN ALREADY EXTRACTED). "
-                    "Do NOT call extract_and_check_feasibility again — "
-                    "if feasibility was already confirmed, call this directly."
+                    "Execute the currently extracted experimental campaign from a paper. "
+                    "Call when user says 'run it', 'execute', 'proceed' after a feasibility report. "
+                    "Only call when extracted_campaign is available in LAB STATE."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "notes": {
-                            "type": "string",
-                            "description": "Optional notes about this run",
-                        }
+                        "notes": {"type": "string", "description": "Optional notes"},
                     },
                     "required": [],
                 },
@@ -277,7 +310,7 @@ def build_tools_schema() -> list:
                 "name": "plotter",
                 "description": (
                     "Generate a multi-panel summary figure from all collected "
-                    "experimental results. Call this after experiments have run."
+                    "experimental results. Call after experiments have run."
                 ),
                 "parameters": {"type": "object", "properties": {}},
             },
@@ -288,23 +321,240 @@ def build_tools_schema() -> list:
                 "name": "query_database",
                 "description": (
                     "Run a read-only SQL SELECT query against the experimental "
-                    "results database. Only call this when experiments have already "
-                    "been run and the user asks a specific question about the data. "
-                    "Do NOT call this to check feasibility or read a paper."
+                    "results database. Only call when experiments have been run."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "sql": {
-                            "type": "string",
-                            "description": "SELECT statement to execute",
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Human-readable description of what this query answers",
-                        },
+                        "sql": {"type": "string", "description": "SELECT statement"},
+                        "description": {"type": "string", "description": "What this query answers"},
                     },
                     "required": ["sql", "description"],
+                },
+            },
+        },
+
+        # ── Phase 3: new agent actions ────────────────────────────────────────
+
+        {
+            "type": "function",
+            "function": {
+                "name": "plan_workflow",
+                "description": (
+                    "Propose a structured workflow plan for any free-form experimental request. "
+                    "Use this when the user asks to run experiments that are NOT from an uploaded paper. "
+                    "Examples: 'optimise porosity and AM under 100W for 30 iterations', "
+                    "'make a sample at 92% AM and 50% porosity then test at 100W', "
+                    "'find the best specific energy under 150W'. "
+                    "The plan will be shown to the user for review and modification before execution. "
+                    "Each step in the plan must have a 'kind' matching available step types. "
+                    "Use {{variable_name}} syntax to reference outputs of previous steps."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "One-line human-readable summary of the proposed workflow",
+                        },
+                        "steps": {
+                            "type": "array",
+                            "description": "Ordered list of workflow steps",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": [
+                                            "prepare_sample",
+                                            "test_sample",
+                                            "optimise_condition",
+                                            "list_samples",
+                                            "query_database",
+                                            "plotter",
+                                        ],
+                                        "description": "Step type",
+                                    },
+                                    "label": {
+                                        "type": "string",
+                                        "description": "Human-readable step description",
+                                    },
+                                    "instrument": {
+                                        "type": "string",
+                                        "description": "Instrument to use e.g. 'SamplerAgent', 'TesterAgent'",
+                                    },
+                                    "params": {
+                                        "type": "object",
+                                        "description": "Parameters for prepare_sample step",
+                                    },
+                                    "produces": {
+                                        "type": "string",
+                                        "description": "Variable name for step output e.g. 'sample_id'",
+                                    },
+                                    "sample_ref": {
+                                        "type": "string",
+                                        "description": "Sample ID or {{variable}} reference for test_sample",
+                                    },
+                                    "conditions": {
+                                        "type": "object",
+                                        "description": "Fixed conditions for test_sample e.g. {'power_W': 100}",
+                                    },
+                                    "measures": {
+                                        "type": "string",
+                                        "description": "Output metric name e.g. 'specific_energy'",
+                                    },
+                                    "condition_label": {
+                                        "type": "string",
+                                        "description": "Condition name for optimise_condition e.g. 'power_W'",
+                                    },
+                                    "condition_value": {
+                                        "type": "number",
+                                        "description": "Fixed condition value for optimise_condition",
+                                    },
+                                    "condition_unit": {
+                                        "type": "string",
+                                        "description": "Unit for condition e.g. 'W', 'C', 'pH'",
+                                    },
+                                    "free_params": {
+                                        "type": "array",
+                                        "description": "Free parameters for BO optimise_condition step",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "name": {"type": "string"},
+                                                "min":  {"type": "number"},
+                                                "max":  {"type": "number"},
+                                                "unit": {"type": "string"},
+                                            },
+                                        },
+                                    },
+                                    "objective_metric": {
+                                        "type": "string",
+                                        "description": "Metric to optimise e.g. 'specific_energy'",
+                                    },
+                                    "n_calls": {
+                                        "type": "integer",
+                                        "description": "Number of BO iterations",
+                                    },
+                                    "n_initial_points": {
+                                        "type": "integer",
+                                        "description": "Random initial points before GP fitting",
+                                    },
+                                    "sql": {
+                                        "type": "string",
+                                        "description": "SQL query for query_database step",
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "description": "Query description",
+                                    },
+                                    "editable_fields": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Fields the user can edit in the plan editor",
+                                    },
+                                },
+                                "required": ["kind", "label"],
+                            },
+                        },
+                    },
+                    "required": ["summary", "steps"],
+                },
+            },
+        },
+
+        {
+            "type": "function",
+            "function": {
+                "name": "prepare_sample",
+                "description": (
+                    "Prepare a physical sample using the SamplerAgent. "
+                    "Use when user asks to 'make a sample', 'prepare an electrode', "
+                    "or similar. The sample is stored in the lab inventory with a unique ID. "
+                    "The user can later ask to test it. "
+                    "Prefer plan_workflow for multi-step requests."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "params": {
+                            "type": "object",
+                            "description": "Preparation parameters e.g. {'active_material': 92, 'porosity': 50}",
+                        },
+                        "notes": {
+                            "type": "string",
+                            "description": "Optional notes about this sample",
+                        },
+                    },
+                    "required": ["params"],
+                },
+            },
+        },
+
+        {
+            "type": "function",
+            "function": {
+                "name": "test_sample",
+                "description": (
+                    "Test a prepared sample using the TesterAgent. "
+                    "Use when user asks to 'test sample S-1-001', 'measure the specific energy of S-1-001', "
+                    "or similar. The sample must exist in the lab inventory. "
+                    "Prefer plan_workflow for multi-step requests."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "sample_id": {
+                            "type": "string",
+                            "description": "Sample ID from the lab inventory e.g. 'S-1-001'",
+                        },
+                        "conditions": {
+                            "type": "object",
+                            "description": "Test conditions e.g. {'power_W': 100}",
+                        },
+                        "measures": {
+                            "type": "string",
+                            "description": "Output metric to measure e.g. 'specific_energy'",
+                        },
+                    },
+                    "required": ["sample_id", "conditions"],
+                },
+            },
+        },
+
+        {
+            "type": "function",
+            "function": {
+                "name": "list_samples",
+                "description": (
+                    "List all samples in the lab inventory. "
+                    "Use when user asks 'what samples do I have', 'show my samples', "
+                    "'what's in the lab', or similar."
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "resume_outstanding_tasks",
+                "description": (
+                    "Resume any incomplete experimental runs from a previous lab day. "
+                    "Call this when the user says 'continue tomorrow', 'resume', "
+                    "'continue where we left off', 'next day', or similar. "
+                    "This will advance the virtual lab clock to the next day and "
+                    "re-queue all incomplete runs for execution. "
+                    "Only call when LAB STATE shows outstanding tasks."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "notes": {
+                            "type": "string",
+                            "description": "Optional notes about resuming",
+                        },
+                    },
+                    "required": [],
                 },
             },
         },

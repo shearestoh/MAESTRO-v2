@@ -161,6 +161,140 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
                 session.equipment_status = EquipmentStatusModel()
                 session.current_activity = None
 
+    # Auto-handle plan_workflow — store plan on session, show in editor
+    if session.agent_state.awaiting_confirmation:
+        pending_names = [
+            tc["function"]["name"]
+            for tc in session.agent_state.pending_tool_calls
+        ]
+        has_plan_workflow = any(n == "plan_workflow" for n in pending_names)
+
+        if has_plan_workflow:
+            for tc in session.agent_state.pending_tool_calls:
+                if tc["function"]["name"] == "plan_workflow":
+                    args = {}
+                    try:
+                        args = json.loads(tc["function"]["arguments"] or "{}")
+                    except Exception:
+                        pass
+
+                    from app.core.models import WorkflowPlan, WorkflowStep
+                    steps = []
+                    for s in args.get("steps", []):
+                        # Set editable_fields based on step kind
+                        editable = []
+                        if s.get("kind") == "optimise_condition":
+                            editable = ["n_calls", "n_initial_points", "condition_value"]
+                            for fp in s.get("free_params", []):
+                                editable += [f"{fp['name']}_min", f"{fp['name']}_max"]
+                        elif s.get("kind") in ("prepare_sample", "test_sample"):
+                            editable = list(s.get("params", {}).keys()) + list(s.get("conditions", {}).keys())
+                        s["editable_fields"] = editable
+                        steps.append(WorkflowStep(**s))
+
+                    session.pending_plan = WorkflowPlan(
+                        summary=args.get("summary", "Proposed workflow"),
+                        steps=steps,
+                        source="agent",
+                    )
+                    # Keep awaiting_confirmation=True so frontend shows editor
+                    break
+
+    # Handle prepare_sample / test_sample / list_samples directly
+    # (no approval needed for single instrument actions)
+    if session.agent_state.awaiting_confirmation:
+        pending_names = [
+            tc["function"]["name"]
+            for tc in session.agent_state.pending_tool_calls
+        ]
+        single_instrument_actions = {"prepare_sample", "test_sample", "list_samples"}
+        all_single = all(n in single_instrument_actions for n in pending_names)
+
+        if all_single:
+            pending_calls = list(session.agent_state.pending_tool_calls)
+            with lock:
+                session.agent_state.awaiting_confirmation = False
+                session.agent_state.pending_tool_calls    = []
+
+            dag_context = {}
+            for tc in pending_calls:
+                args = {}
+                try:
+                    args = json.loads(tc["function"]["arguments"] or "{}")
+                except Exception:
+                    pass
+
+                name = tc["function"]["name"]
+                session.agent_state.messages.append({
+                    "role":         "tool",
+                    "tool_call_id": tc["id"],
+                    "name":         name,
+                    "content":      json.dumps({"status": "running"}),
+                })
+
+                if name == "prepare_sample":
+                    step = {
+                        "kind":       "prepare_sample",
+                        "params":     args.get("params", {}),
+                        "instrument": "SamplerAgent",
+                        "produces":   "sample_id",
+                    }
+                    try:
+                        execute_plan_step(session, step, query_database, dag_context)
+                    except Exception as e:
+                        session.agent_state.messages.append({
+                            "role": "assistant",
+                            "content": f"Error preparing sample: `{e}`",
+                        })
+
+                elif name == "test_sample":
+                    step = {
+                        "kind":       "test_sample",
+                        "sample_ref": args.get("sample_id", ""),
+                        "conditions": args.get("conditions", {}),
+                        "measures":   args.get("measures", "specific_energy"),
+                        "instrument": "TesterAgent",
+                    }
+                    try:
+                        execute_plan_step(session, step, query_database, dag_context)
+                    except Exception as e:
+                        session.agent_state.messages.append({
+                            "role": "assistant",
+                            "content": f"Error testing sample: `{e}`",
+                        })
+
+                elif name == "list_samples":
+                    try:
+                        execute_plan_step(session, {"kind": "list_samples"}, query_database, dag_context)
+                    except Exception as e:
+                        session.agent_state.messages.append({
+                            "role": "assistant",
+                            "content": f"Error listing samples: `{e}`",
+                        })            
+
+    # Auto-handle resume_outstanding_tasks
+    if session.agent_state.awaiting_confirmation:
+        pending_names = [
+            tc["function"]["name"]
+            for tc in session.agent_state.pending_tool_calls
+        ]
+        if any(n == "resume_outstanding_tasks" for n in pending_names):
+            pending_calls = list(session.agent_state.pending_tool_calls)
+            with lock:
+                session.agent_state.awaiting_confirmation = False
+                session.agent_state.pending_tool_calls    = []
+
+            for tc in pending_calls:
+                if tc["function"]["name"] == "resume_outstanding_tasks":
+                    session.agent_state.messages.append({
+                        "role":         "tool",
+                        "tool_call_id": tc["id"],
+                        "name":         tc["function"]["name"],
+                        "content":      json.dumps({"status": "running"}),
+                    })
+                    resume_outstanding_tasks(session_id)
+                    break
+
     with lock:
         session.equipment_status = EquipmentStatusModel()
         session.current_activity = None
@@ -174,17 +308,125 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
 
     return session
 
-
 def _sync_condition_key(session: SessionModel):
-    """
-    Update active_condition_key from the extracted campaign.
-    Called after feasibility extraction completes.
-    """
     if session.extracted_campaign:
         ocs = session.extracted_campaign.operating_conditions
         if ocs:
             session.active_condition_key = ocs[0].get("name", "power_W")
 
+def execute_plan(session_id: str, plan_dict: dict) -> SessionModel:
+    """
+    Execute a WorkflowPlan that was approved (and optionally edited)
+    by the user in the WorkflowPlanEditor.
+
+    Called from POST /execute-plan.
+    Converts the plan dict into background job steps and starts execution.
+    """
+    from app.core.models import WorkflowPlan
+    session = get_session(session_id)
+    lock    = _lock_for(session_id)
+
+    plan  = WorkflowPlan(**plan_dict)
+    steps = [step.model_dump() for step in plan.steps]
+
+    with lock:
+        session.background_job_plan        = steps
+        session.background_job_index       = 0
+        session.background_job_status      = "running"
+        session.background_job_active      = True
+        session.background_job_label       = "Initialising..."
+        session.background_job_error       = None
+        session.live_event_queue           = []
+        session.pending_plan               = None
+        session.agent_state.awaiting_confirmation = False
+        session.agent_state.pending_tool_calls    = []
+
+        # Inject tool response for plan_workflow tool call
+        _inject_missing_tool_responses(session)
+
+    threading.Thread(
+        target=_run_background_job,
+        args=(session_id,),
+        daemon=True,
+        name=f"maestro-plan-{session_id[:8]}",
+    ).start()
+
+    return session
+
+def resume_outstanding_tasks(session_id: str) -> SessionModel:
+    """
+    Advance to next day and re-queue all outstanding tasks for execution.
+    Called when user says 'continue tomorrow' or similar.
+    """
+    session = get_session(session_id)
+    lock    = _lock_for(session_id)
+
+    # Advance virtual clock
+    advance_to_next_day(session)
+
+    outstanding = list(session.outstanding_tasks)
+    if not outstanding:
+        session.agent_state.messages.append({
+            "role":    "assistant",
+            "content": (
+                f"Advanced to Day {session.virtual_day_index}. "
+                f"No outstanding tasks to resume."
+            ),
+        })
+        return session
+
+    # Build plan from outstanding tasks
+    plan = []
+    for task in outstanding:
+        kind = task.get("kind", "optimise_condition")
+        if kind in ("optimise_condition", "optimise_power"):
+            plan.append({
+                "kind":             "optimise_condition",
+                "condition_label":  task.get("condition_label", "power_W"),
+                "condition_value":  float(task.get("condition_value", task.get("power_W", 0))),
+                "condition_unit":   task.get("condition_unit", ""),
+                "free_params":      task.get("free_params", [
+                    {"name": "active_material", "min": 88.0, "max": 98.0, "unit": "wt%"},
+                    {"name": "porosity",        "min": 20.0, "max": 60.0, "unit": "%"},
+                ]),
+                "objective_metric": task.get("objective_metric", "specific_energy"),
+                "n_calls":          int(task.get("remaining_n_calls", 20)),
+                "n_initial_points": 3,   # fewer init points for resumption
+            })
+
+    if not plan:
+        return session
+
+    with lock:
+        # Clear outstanding tasks — they're now in the plan
+        session.outstanding_tasks          = []
+        session.background_job_plan        = plan
+        session.background_job_index       = 0
+        session.background_job_status      = "running"
+        session.background_job_active      = True
+        session.background_job_label       = "Resuming incomplete runs..."
+        session.background_job_error       = None
+        session.live_event_queue           = []
+        session.agent_state.awaiting_confirmation = False
+        session.agent_state.pending_tool_calls    = []
+
+    session.agent_state.messages.append({
+        "role":    "assistant",
+        "content": (
+            f"▶️ **Resuming on Day {session.virtual_day_index}.**\n\n"
+            f"Queued {len(plan)} incomplete run(s) for execution. "
+            f"The workflow is now running."
+        ),
+    })
+
+    threading.Thread(
+        target=_run_background_job,
+        args=(session_id,),
+        daemon=True,
+        name=f"maestro-resume-{session_id[:8]}",
+    ).start()
+
+    return session
 
 # ── Live event consumption ────────────────────────────────────────────────────
 
@@ -216,22 +458,8 @@ def _consume_one_live_event(session: SessionModel):
 
 # ── Background job runner ─────────────────────────────────────────────────────
 def _inject_missing_tool_responses(session: SessionModel):
-    """
-    Scan message history for assistant messages with tool_calls that
-    have no matching tool response message.
-
-    OpenAI requires every tool_call_id to be answered by a tool message.
-    This can be violated when:
-    - The background job completes without injecting tool responses
-    - The user aborts mid-flow
-    - Session state is partially updated
-
-    This function repairs the message history in-place by injecting
-    synthetic tool response messages for any orphaned tool_call_ids.
-    """
+    """Repair orphaned tool_call_ids in message history."""
     messages = session.agent_state.messages
-
-    # Collect all tool_call_ids that have already been responded to
     responded_ids: set[str] = set()
     for msg in messages:
         if msg.get("role") == "tool":
@@ -239,40 +467,27 @@ def _inject_missing_tool_responses(session: SessionModel):
             if tc_id:
                 responded_ids.add(tc_id)
 
-    # Find assistant messages with unanswered tool_calls
-    injected = []
+    injections = []
     for i, msg in enumerate(messages):
         if msg.get("role") != "assistant":
             continue
-        tool_calls = msg.get("tool_calls", [])
-        if not tool_calls:
-            continue
-
-        for tc in tool_calls:
+        for tc in msg.get("tool_calls", []):
             tc_id   = tc.get("id")
             tc_name = tc.get("function", {}).get("name", "unknown_tool")
-
             if tc_id and tc_id not in responded_ids:
-                # Inject a synthetic tool response immediately after
-                # this assistant message
-                injected.append((i + 1, {
+                injections.append((i + 1, {
                     "role":         "tool",
                     "tool_call_id": tc_id,
                     "name":         tc_name,
                     "content":      json.dumps({
                         "status":  "completed",
-                        "message": (
-                            f"Tool '{tc_name}' executed successfully "
-                            f"as part of the background workflow."
-                        ),
+                        "message": f"Tool '{tc_name}' executed successfully.",
                     }),
                 }))
                 responded_ids.add(tc_id)
 
-    # Insert injected messages in reverse order to preserve indices
-    for insert_idx, tool_msg in reversed(injected):
+    for insert_idx, tool_msg in reversed(injections):
         messages.insert(insert_idx, tool_msg)
-
 
 def _run_background_job(session_id: str):
     """
@@ -283,19 +498,22 @@ def _run_background_job(session_id: str):
     - Each step wrapped in try/except
     - Always sets background_job_active=False on exit
     - Lock held only for state mutations
+    - dag_context shared across all steps for DAG variable resolution
     """
-    session = get_session(session_id)
-    lock    = _lock_for(session_id)
+    session     = get_session(session_id)
+    lock        = _lock_for(session_id)
+    dag_context: dict = {}   # shared across all steps in this job
 
-    def _mark_done(success: bool, error_msg: str = ""):
+    def mark_done(success: bool, error_msg: str = ""):
+        """Inner helper — closes over session and lock."""
         with lock:
             session.background_job_active  = False
             session.background_job_status  = "completed" if success else "failed"
             session.background_job_label   = None
             session.current_activity       = None
             session.equipment_status       = EquipmentStatusModel()
+            session.pending_plan           = None
 
-            # Repair orphaned tool call chains
             _inject_missing_tool_responses(session)
 
             if not success:
@@ -312,52 +530,50 @@ def _run_background_job(session_id: str):
                 results  = session.agent_state.results_store
                 n_evals  = sum(len(r.get("X", [])) for r in results)
                 n_fails  = sum(r.get("failed_samples", 0) for r in results)
-
                 best_obj = max(
                     (r.get("best_objective") or r.get("best_energy") or 0.0
-                    for r in results),
+                     for r in results),
                     default=0.0,
                 )
-
-                obj_label  = "objective"
+                obj_label  = (
+                    session.extracted_campaign.objective_metric
+                    if session.extracted_campaign else "objective"
+                )
                 cond_label = session.active_condition_key or "condition"
-
-                if session.extracted_campaign:
-                    obj_label = (
-                        session.extracted_campaign.objective_metric
-                        or "objective"
-                    )
 
                 conds_done = [
                     f"{r.get('condition_label', cond_label)}"
                     f"={r.get('condition_value', r.get('power_W', '?'))}"
-                    for r in results
-                    if r.get("X")
+                    for r in results if r.get("X")
                 ]
 
-                # ── Check if this was a plotter job ───────────────────────────
+                outstanding      = session.outstanding_tasks
+                outstanding_note = ""
+                if outstanding:
+                    outstanding_note = (
+                        f"\n\n⏳ **{len(outstanding)} incomplete run(s)** — "
+                        f"lab time ran out."
+                    )
+
                 is_plotter_job = any(
                     step.get("kind") == "plotter"
                     for step in session.background_job_plan
                 )
 
                 if is_plotter_job and session.show_plotter_image:
-                    # Option C: plot image as a separate assistant message
-                    # The plot is served via /api/plot/{session_id}
                     session.agent_state.messages.append({
                         "role":    "assistant",
                         "content": (
-                            "Here is the optimisation summary figure:\n\n"
+                            f"Here is the optimisation summary figure:\n\n"
                             f"![Optimisation Summary]"
                             f"(/api/plot/{session.session_id})\n\n"
-                            f"The figure shows the parameter space explored "
-                            f"at each operating condition, with the optimal "
-                            f"parameter path in the final panel. "
-                            f"Ask me to analyse the results or continue tomorrow."
+                            f"The figure shows the parameter space explored at each "
+                            f"operating condition, with the optimal parameter path in "
+                            f"the final panel. Ask me to analyse the results or "
+                            f"continue tomorrow."
                         ),
                     })
-                else:
-                    # Standard workflow completion message
+                elif n_evals > 0:
                     session.agent_state.messages.append({
                         "role":    "assistant",
                         "content": (
@@ -368,17 +584,14 @@ def _run_background_job(session_id: str):
                             f"| Best {obj_label} | {best_obj:.4f} |\n"
                             f"| Failed steps | {n_fails} |\n"
                             f"| Conditions completed | "
-                            f"{', '.join(conds_done) or 'none'} |\n\n"
+                            f"{', '.join(conds_done) or 'none'} |"
+                            f"{outstanding_note}\n\n"
                             f"Ask me to **generate a summary figure**, "
                             f"**analyse the results**, or **continue tomorrow**."
                         ),
                     })
 
-            # ── Final state_update event to unblock frontend spinner ──────────
-            # This ensures the WebSocket sends one last state_update after
-            # background_job_active is set to False, so the frontend
-            # refreshState() call sees the completed status and clears
-            # any lingering loading indicators.
+            # Final event to unblock frontend spinner
             session.live_event_queue.append(ExecutionEvent(
                 event_type="job_complete",
                 message="Job finished.",
@@ -408,11 +621,17 @@ def _run_background_job(session_id: str):
                     step = session.background_job_plan[
                         session.background_job_index
                     ]
-                    session.background_job_label  = step.get("kind", "running")
+                    # Use step label if available, else kind
+                    session.background_job_label  = (
+                        step.get("label") or step.get("kind", "running")
+                    )
                     session.background_job_status = "running"
 
                 try:
-                    result = execute_plan_step(session, step, query_database)
+                    # Pass dag_context so steps can share outputs
+                    result = execute_plan_step(
+                        session, step, query_database, dag_context
+                    )
                     with lock:
                         session.agent_state.last_tool_result = result
                         session.background_job_index += 1
@@ -423,16 +642,16 @@ def _run_background_job(session_id: str):
                             f"error: {step_err}"
                         )
                         session.activity_log = session.activity_log[-20:]
-                        session.background_job_index += 1
+                        session.background_job_index += 1  # skip, continue
 
             else:
-                _mark_done(success=True)
+                mark_done(success=True)
                 break
 
             time.sleep(0.25)
 
     except Exception as fatal:
-        _mark_done(
+        mark_done(
             success=False,
             error_msg=f"{type(fatal).__name__}: {fatal}",
         )
@@ -572,22 +791,12 @@ def register_artifact(
 # ── State serialisation ───────────────────────────────────────────────────────
 
 def session_state_payload(session: SessionModel) -> dict:
-    """
-    Serialise full session state for the frontend.
-
-    Phase 3: dynamic metric labels derived from active_condition_key
-    and campaign objective_metric rather than hardcoded battery terms.
-    """
-    results = session.agent_state.results_store
-
-    # ── Dynamic metric labels ─────────────────────────────────────────────────
-    obj_label   = "Objective"
-    cond_label  = session.active_condition_key or "Condition"
+    results    = session.agent_state.results_store
+    obj_label  = "Objective"
+    cond_label = session.active_condition_key or "Condition"
 
     if session.extracted_campaign:
-        obj_label  = (
-            session.extracted_campaign.objective_metric or "Objective"
-        )
+        obj_label  = session.extracted_campaign.objective_metric or "Objective"
         ocs = session.extracted_campaign.operating_conditions
         if ocs:
             cond_label = ocs[0].get("name", cond_label)
@@ -622,15 +831,18 @@ def session_state_payload(session: SessionModel) -> dict:
         "background_job_plan_length": len(session.background_job_plan),
         "timeline":                   build_dynamic_timeline(session),
         "active_condition_key":       session.active_condition_key,
-
-        # Dynamic metric labels for frontend
+        # Phase 3: sample registry
+        "sample_registry":            [s.model_dump() for s in session.sample_registry],
+        # Phase 3: pending workflow plan
+        "pending_plan":               (
+            session.pending_plan.model_dump()
+            if session.pending_plan else None
+        ),
         "metric_labels": {
             "experiments": "Experiments",
             "best_result": f"Best {obj_label}",
             "conditions":  f"{cond_label} Runs",
             "failures":    "Failed Steps",
         },
-
-        # Phase 2C: resource log for Gantt
         "resource_log": session.resource_log[-100:],
     }

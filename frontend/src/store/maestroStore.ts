@@ -1,6 +1,8 @@
 import { create } from "zustand";
-import type { SessionState, WsEvent } from "@/types";
+import type { SessionState, WsEvent, WorkflowPlan } from "@/types";
 import { api } from "@/lib/api";
+
+type Theme = "light" | "dark";
 
 interface MaestroStore {
   // Session
@@ -16,17 +18,21 @@ interface MaestroStore {
 
   // UI
   sidebarOpen: boolean;
+  theme:       Theme;
 
   // Actions
   initSession:    () => Promise<void>;
   refreshState:   () => Promise<void>;
   sendMessage:    (text: string) => Promise<void>;
   confirm:        (proceed: boolean) => Promise<void>;
+  executePlan:    (plan: WorkflowPlan) => Promise<void>;
   nextDay:        () => Promise<void>;
   reset:          () => Promise<void>;
   pushWsEvent:    (event: WsEvent) => void;
   setWsConnected: (v: boolean) => void;
   setSidebarOpen: (v: boolean) => void;
+  setTheme:       (t: Theme) => void;
+  toggleTheme:    () => void;
   clearError:     () => void;
 }
 
@@ -39,6 +45,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
   liveEvents:  [],
   lastEvent:   null,
   sidebarOpen: true,
+  theme:       "light",   // ← light mode default
 
   initSession: async () => {
     set({ isLoading: true, error: null });
@@ -72,9 +79,6 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     if (!sessionId) return;
     try {
       const res = await api.getState(sessionId);
-      // ── Fix: reset isLoading when background job is no longer active ──
-      // This handles the case where confirm() set isLoading=true but
-      // the background job has since completed.
       const jobDone = (
         res.state.background_job_status === "completed" ||
         res.state.background_job_status === "failed"    ||
@@ -107,16 +111,19 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     set({ isLoading: true });
     try {
       const res = await api.confirm(sessionId, proceed);
-      // ── Fix: only clear isLoading if no background job was started ──
-      // If a background job is now running, isLoading will be cleared
-      // by refreshState() when the job completes (via WebSocket).
-      const jobStarted = res.state.background_job_active;
-      set({
-        state:     res.state,
-        isLoading: jobStarted ? false : false,
-        // Always false after confirm — spinner is shown via
-        // background_job_active instead, which is more accurate
-      });
+      set({ state: res.state, isLoading: false });
+    } catch (e) {
+      set({ error: String(e), isLoading: false });
+    }
+  },
+
+  executePlan: async (plan: WorkflowPlan) => {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    set({ isLoading: true });
+    try {
+      const res = await api.executePlan(sessionId, plan);
+      set({ state: res.state, isLoading: false });
     } catch (e) {
       set({ error: String(e), isLoading: false });
     }
@@ -151,5 +158,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
 
   setWsConnected: (v) => set({ wsConnected: v }),
   setSidebarOpen: (v) => set({ sidebarOpen: v }),
+  setTheme:       (t) => set({ theme: t }),
+  toggleTheme:    ()  => set((s) => ({ theme: s.theme === "light" ? "dark" : "light" })),
   clearError:     ()  => set({ error: null }),
 }));

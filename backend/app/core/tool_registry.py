@@ -1,14 +1,14 @@
 """
-Domain-agnostic tool registry — single source of truth for lab capabilities.
+Domain-agnostic instrument registry — single source of truth for
+lab capabilities.
 
-Every tool registered here is:
-- Visible to the LLM (injected into system prompt)
-- Queryable by the feasibility checker
-- Readable by the Lab Builder UI
-- Writable via the Lab Builder UI (Phase 2A.5)
+Phase 3: renamed from 'tool registry' to 'instrument registry'
+to clarify the distinction between:
+  - Instruments (physical/virtual lab equipment registered here)
+  - Agent actions (LLM-callable functions in llm.py)
 
-Adding a new virtual instrument here immediately makes the agent
-aware of it — no code changes needed anywhere else.
+Backward compat: TOOL_REGISTRY alias kept so existing imports
+don't break during transition.
 """
 from __future__ import annotations
 
@@ -18,11 +18,11 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
-# ── Tool component schemas ────────────────────────────────────────────────────
+# ── Instrument component schemas ──────────────────────────────────────────────
 
-class ToolParameter(BaseModel):
+class InstrumentParameter(BaseModel):
     name:        str
-    type:        str = "continuous"   # continuous | discrete | categorical
+    type:        str = "continuous"
     min:         Optional[float] = None
     max:         Optional[float] = None
     unit:        str = ""
@@ -30,73 +30,100 @@ class ToolParameter(BaseModel):
     required:    bool = True
 
 
-class ToolOutput(BaseModel):
+class InstrumentOutput(BaseModel):
     name:        str
-    type:        str = "scalar"       # scalar | vector | image | text
+    type:        str = "scalar"
     unit:        str = ""
     description: str = ""
 
 
-class ToolFailureMode(BaseModel):
+class InstrumentFailureMode(BaseModel):
     name:        str
     description: str
     probability: float = 0.0
 
 
-class VirtualTool(BaseModel):
+class VirtualInstrument(BaseModel):
+    """
+    A virtual lab instrument or computational service.
+
+    Domain-agnostic: no hardcoded parameter names.
+    The LLM reads descriptions to understand capabilities.
+
+    kind values:
+      instrument   — physical lab equipment (sampler, tester, reactor)
+      optimiser    — computational optimisation engine
+      analyser     — data analysis / reporting tool
+      data         — data store / database
+      custom       — user-defined
+    """
     tool_id:       str = Field(default_factory=lambda: str(uuid.uuid4()))
     name:          str
-    kind:          str                # instrument | optimiser | analyser | data | custom
+    kind:          str
     description:   str
-    parameters:    List[ToolParameter]   = Field(default_factory=list)
-    outputs:       List[ToolOutput]      = Field(default_factory=list)
-    failure_modes: List[ToolFailureMode] = Field(default_factory=list)
+    parameters:    List[InstrumentParameter]   = Field(default_factory=list)
+    outputs:       List[InstrumentOutput]      = Field(default_factory=list)
+    failure_modes: List[InstrumentFailureMode] = Field(default_factory=list)
     time_cost_min: float = 0.0
     enabled:       bool  = True
     metadata:      Dict[str, Any] = Field(default_factory=dict)
 
+    # Backward compat aliases
+    @property
+    def instrument_id(self) -> str:
+        return self.tool_id
+
+
+# Backward compat alias
+VirtualTool = VirtualInstrument
+
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
-class ToolRegistry:
+class InstrumentRegistry:
     """
-    In-memory registry of all virtual tools.
-    Thread-safe for reads; writes should be from the main thread only.
+    In-memory registry of all virtual instruments.
+
+    Previously called ToolRegistry — renamed for clarity.
+    TOOL_REGISTRY alias maintained for backward compatibility.
     """
 
     def __init__(self):
-        self._tools: Dict[str, VirtualTool] = {}
+        self._instruments: Dict[str, VirtualInstrument] = {}
 
     # ── CRUD ─────────────────────────────────────────────────────────────────
 
-    def register(self, tool: VirtualTool) -> VirtualTool:
-        self._tools[tool.tool_id] = tool
-        return tool
+    def register(self, instrument: VirtualInstrument) -> VirtualInstrument:
+        self._instruments[instrument.tool_id] = instrument
+        return instrument
 
-    def get(self, tool_id: str) -> Optional[VirtualTool]:
-        return self._tools.get(tool_id)
+    def get(self, tool_id: str) -> Optional[VirtualInstrument]:
+        return self._instruments.get(tool_id)
 
-    def get_by_name(self, name: str) -> Optional[VirtualTool]:
+    def get_by_name(self, name: str) -> Optional[VirtualInstrument]:
         return next(
-            (t for t in self._tools.values() if t.name == name), None
+            (t for t in self._instruments.values() if t.name == name),
+            None,
         )
 
-    def list_all(self) -> List[VirtualTool]:
-        return [t for t in self._tools.values() if t.enabled]
+    def list_all(self) -> List[VirtualInstrument]:
+        return [t for t in self._instruments.values() if t.enabled]
 
     def remove(self, tool_id: str) -> bool:
-        if tool_id in self._tools:
-            del self._tools[tool_id]
+        if tool_id in self._instruments:
+            del self._instruments[tool_id]
             return True
         return False
 
-    def update(self, tool_id: str, updates: Dict[str, Any]) -> Optional[VirtualTool]:
-        if tool_id not in self._tools:
+    def update(
+        self, tool_id: str, updates: Dict[str, Any]
+    ) -> Optional[VirtualInstrument]:
+        if tool_id not in self._instruments:
             return None
-        data = self._tools[tool_id].model_dump()
+        data = self._instruments[tool_id].model_dump()
         data.update(updates)
-        self._tools[tool_id] = VirtualTool(**data)
-        return self._tools[tool_id]
+        self._instruments[tool_id] = VirtualInstrument(**data)
+        return self._instruments[tool_id]
 
     # ── Queries ───────────────────────────────────────────────────────────────
 
@@ -114,16 +141,29 @@ class ToolRegistry:
                 outputs.add(o.name)
         return sorted(outputs)
 
+    def get_instruments_by_kind(self, kind: str) -> List[VirtualInstrument]:
+        """Return all enabled instruments of a given kind."""
+        return [t for t in self.list_all() if t.kind == kind]
+
+    def get_sample_preparers(self) -> List[VirtualInstrument]:
+        """Return instruments that can prepare samples (have parameters, no outputs)."""
+        return [
+            t for t in self.list_all()
+            if t.kind == "instrument" and t.parameters and not t.outputs
+        ]
+
+    def get_sample_testers(self) -> List[VirtualInstrument]:
+        """Return instruments that can test samples (have outputs)."""
+        return [
+            t for t in self.list_all()
+            if t.kind == "instrument" and t.outputs
+        ]
+
     def check_feasibility(
         self,
         required_params:  List[str],
         required_outputs: List[str],
     ) -> dict:
-        """
-        Domain-agnostic feasibility check.
-        Returns a structured dict consumed by the extraction pipeline
-        and displayed in the Campaign page.
-        """
         controllable = set(self.all_controllable_parameters())
         measurable   = set(self.all_measurable_outputs())
 
@@ -140,15 +180,15 @@ class ToolRegistry:
 
     def to_llm_context(self) -> str:
         """
-        Render registry as structured text for injection into LLM system prompt.
-        Called on every LLM invocation — always reflects current registry state.
+        Render registry as structured text for LLM system prompt.
+        Called on every LLM invocation.
         """
-        tools = self.list_all()
-        if not tools:
-            return "No tools registered in the virtual lab."
+        instruments = self.list_all()
+        if not instruments:
+            return "No instruments registered in the virtual lab."
 
-        lines = ["Available virtual lab tools:\n"]
-        for t in tools:
+        lines = ["Available virtual lab instruments:\n"]
+        for t in instruments:
             lines.append(f"### {t.name} ({t.kind})")
             lines.append(f"  {t.description}")
             if t.parameters:
@@ -177,44 +217,44 @@ class ToolRegistry:
         return "\n".join(lines)
 
     def to_dict_list(self) -> List[dict]:
-        """Serialise all tools for the API response."""
         return [t.model_dump() for t in self.list_all()]
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
 
-TOOL_REGISTRY = ToolRegistry()
+INSTRUMENT_REGISTRY = InstrumentRegistry()
+
+# Backward compat alias — existing imports of TOOL_REGISTRY still work
+TOOL_REGISTRY = INSTRUMENT_REGISTRY
 
 
-# ── Default tools ─────────────────────────────────────────────────────────────
+# ── Default instruments ───────────────────────────────────────────────────────
 
 def register_default_tools() -> None:
     """
-    Register the built-in virtual tools for the battery SDL demo.
+    Register the built-in virtual instruments for the battery SDL demo.
     Called once at startup from main.py.
 
     These are expressed as domain-agnostic specs — the LLM reads the
     descriptions and infers what experiments are possible.
-    The surrogate function is a virtual potentiostat; the tool description
-    is what the agent uses for reasoning, not the implementation.
     """
-    TOOL_REGISTRY.register(VirtualTool(
+    INSTRUMENT_REGISTRY.register(VirtualInstrument(
         name="SamplerAgent",
         kind="instrument",
         description=(
             "Prepares physical samples by controlling material composition. "
-            "Sample preparation may fail at extreme parameter values, "
-            "particularly at high active material content combined with low porosity."
+            "Sample preparation may fail at extreme parameter values. "
+            "Returns a prepared sample that can be stored and tested later."
         ),
         parameters=[
-            ToolParameter(
+            InstrumentParameter(
                 name="active_material",
                 type="continuous",
                 min=88.0, max=98.0,
                 unit="wt%",
                 description="Weight fraction of active electrode material",
             ),
-            ToolParameter(
+            InstrumentParameter(
                 name="porosity",
                 type="continuous",
                 min=20.0, max=60.0,
@@ -224,7 +264,7 @@ def register_default_tools() -> None:
         ],
         outputs=[],
         failure_modes=[
-            ToolFailureMode(
+            InstrumentFailureMode(
                 name="electrode_defect",
                 description=(
                     "Sample preparation fails — electrode is unusable. "
@@ -236,17 +276,18 @@ def register_default_tools() -> None:
         time_cost_min=2.0,
     ))
 
-    TOOL_REGISTRY.register(VirtualTool(
+    INSTRUMENT_REGISTRY.register(VirtualInstrument(
         name="TesterAgent",
         kind="instrument",
         description=(
             "Electrochemical discharge tester (virtual potentiostat). "
             "Measures specific energy of a prepared electrode sample "
             "under a specified discharge power condition. "
-            "Uses a validated surrogate model."
+            "Can test any prepared sample — accepts a sample_id or "
+            "direct parameter values."
         ),
         parameters=[
-            ToolParameter(
+            InstrumentParameter(
                 name="power_W",
                 type="continuous",
                 min=50.0, max=250.0,
@@ -255,7 +296,7 @@ def register_default_tools() -> None:
             ),
         ],
         outputs=[
-            ToolOutput(
+            InstrumentOutput(
                 name="specific_energy",
                 type="scalar",
                 unit="Wh/kg",
@@ -263,7 +304,7 @@ def register_default_tools() -> None:
             ),
         ],
         failure_modes=[
-            ToolFailureMode(
+            InstrumentFailureMode(
                 name="measurement_noise",
                 description="Gaussian noise σ=0.5 Wh/kg added to measurement",
                 probability=1.0,
@@ -272,7 +313,7 @@ def register_default_tools() -> None:
         time_cost_min=5.0,
     ))
 
-    TOOL_REGISTRY.register(VirtualTool(
+    INSTRUMENT_REGISTRY.register(VirtualInstrument(
         name="BayesianOptimiser",
         kind="optimiser",
         description=(
@@ -281,14 +322,14 @@ def register_default_tools() -> None:
             "observations. Balances exploration and exploitation automatically."
         ),
         parameters=[
-            ToolParameter(
+            InstrumentParameter(
                 name="n_calls",
                 type="discrete",
                 min=1, max=100,
                 unit="",
                 description="Number of optimisation evaluations to run",
             ),
-            ToolParameter(
+            InstrumentParameter(
                 name="n_initial_points",
                 type="discrete",
                 min=1, max=20,
@@ -297,13 +338,13 @@ def register_default_tools() -> None:
             ),
         ],
         outputs=[
-            ToolOutput(
+            InstrumentOutput(
                 name="next_candidate",
                 type="vector",
                 unit="",
                 description="Suggested parameter values for next experiment",
             ),
-            ToolOutput(
+            InstrumentOutput(
                 name="best_observed",
                 type="scalar",
                 unit="",
@@ -314,7 +355,7 @@ def register_default_tools() -> None:
         time_cost_min=0.0,
     ))
 
-    TOOL_REGISTRY.register(VirtualTool(
+    INSTRUMENT_REGISTRY.register(VirtualInstrument(
         name="ExperimentDatabase",
         kind="data",
         description=(
@@ -323,7 +364,7 @@ def register_default_tools() -> None:
         ),
         parameters=[],
         outputs=[
-            ToolOutput(
+            InstrumentOutput(
                 name="query_result",
                 type="vector",
                 unit="",
@@ -334,7 +375,7 @@ def register_default_tools() -> None:
         time_cost_min=0.0,
     ))
 
-    TOOL_REGISTRY.register(VirtualTool(
+    INSTRUMENT_REGISTRY.register(VirtualInstrument(
         name="Plotter",
         kind="analyser",
         description=(
@@ -344,7 +385,7 @@ def register_default_tools() -> None:
         ),
         parameters=[],
         outputs=[
-            ToolOutput(
+            InstrumentOutput(
                 name="figure",
                 type="image",
                 unit="",

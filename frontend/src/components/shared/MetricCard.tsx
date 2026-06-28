@@ -11,11 +11,11 @@ interface MetricCardProps {
 }
 
 const accentStyles = {
-  blue:  "text-blue-400  border-l-blue-500/50",
-  green: "text-green-400 border-l-green-500/50",
-  amber: "text-amber-400 border-l-amber-500/50",
-  red:   "text-red-400   border-l-red-500/50",
-  muted: "text-slate-400 border-l-slate-600",
+  blue:  "text-blue-600  dark:text-blue-400  border-l-blue-500",
+  green: "text-green-600 dark:text-green-400 border-l-green-500",
+  amber: "text-amber-600 dark:text-amber-400 border-l-amber-500",
+  red:   "text-red-600   dark:text-red-400   border-l-red-500",
+  muted: "text-slate-500 dark:text-slate-400 border-l-slate-400",
 };
 
 export function MetricCard({
@@ -27,12 +27,19 @@ export function MetricCard({
       accentStyles[accent],
       className,
     )}>
-      <div className="flex items-center gap-1.5 text-slate-400 text-xs font-medium uppercase tracking-wider">
+      <div className={cn(
+        "flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider",
+        "text-slate-500 dark:text-slate-400",
+      )}>
         {Icon && <Icon size={11} />}
         {label}
       </div>
-      <div className="text-2xl font-bold font-mono text-slate-100">{value}</div>
-      {sub && <div className="text-xs text-slate-500">{sub}</div>}
+      <div className="text-2xl font-bold font-mono text-slate-800 dark:text-slate-100">
+        {value}
+      </div>
+      {sub && (
+        <div className="text-xs text-slate-500 dark:text-slate-500">{sub}</div>
+      )}
     </div>
   );
 }

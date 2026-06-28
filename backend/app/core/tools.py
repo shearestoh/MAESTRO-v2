@@ -1,21 +1,19 @@
 """
 Physical lab agents and BO execution engine.
 
-Phase 3: fully domain-agnostic plan builder and BO engine.
-- build_execution_plan_from_tool_calls() driven entirely by CampaignSpec
-- expand_optimise_condition_to_events() replaces expand_optimise_power_to_events()
-- Surrogate called via general interface: condition dict + param dict
-- ResultEntry created via make_result_entry() factory
-- All battery-specific hardcoding removed from plan/execution layer
-- Backward compat: power_W / best_energy / best_am / best_por still
-  populated where applicable
+Phase 3:
+- Domain-agnostic plan builder driven by WorkflowPlan/WorkflowStep
+- Sample registry: prepare_sample_step, test_sample_step, list_samples_step
+- DAG step resolution: {{variable}} references between steps
+- Backward compat: optimise_power still works
 """
 from __future__ import annotations
 
 import json
 import math
+import re
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
@@ -38,48 +36,42 @@ from app.core.lab import (
     lab_minutes_remaining,
     max_successes_fit_in_remaining_time,
 )
-from app.core.models import ExecutionEvent, make_result_entry
+from app.core.models import (
+    ExecutionEvent,
+    Sample,
+    SampleResult,
+    WorkflowPlan,
+    WorkflowStep,
+    generate_sample_id,
+    make_result_entry,
+)
 from app.core.surrogate import predict_f
 
 
 # ── Failure probability model ─────────────────────────────────────────────────
 
-def sampler_failure_probability(
-    params: Dict[str, float],
-) -> float:
-    """
-    Domain-agnostic failure probability.
-
-    For the battery surrogate, uses active_material + porosity.
-    For other domains, falls back to the base failure rate.
-    This keeps the sampler realistic for battery campaigns while
-    not breaking for other domains.
-    """
-    active_material = params.get(
-        "active_material",
-        params.get("am", params.get("active_material_wt", None)),
+def sampler_failure_probability(params: Dict[str, float]) -> float:
+    active_material = (
+        params.get("active_material")
+        or params.get("am")
+        or params.get("active_material_wt")
     )
-    porosity = params.get(
-        "porosity",
-        params.get("por", params.get("electrode_porosity", None)),
+    porosity = (
+        params.get("porosity")
+        or params.get("por")
+        or params.get("electrode_porosity")
     )
-
     if active_material is not None and porosity is not None:
         am_factor  = max(0.0, (float(active_material) - 94.5) / 1.5)
         por_factor = max(0.0, (35.0 - float(porosity)) / 5.0)
         p = SAMPLER_BASE_FAIL_PROB + 0.06 * am_factor + 0.07 * por_factor
         return float(min(0.25, max(0.0, p)))
-
     return float(SAMPLER_BASE_FAIL_PROB)
 
 
 # ── Physical agents ───────────────────────────────────────────────────────────
 
 class SamplerAgent:
-    """
-    Prepares a sample given arbitrary parameter dict.
-    Returns the same dict on success, or a failure dict.
-    """
     def sample(self, params: Dict[str, float]) -> Dict:
         fail_prob = sampler_failure_probability(params)
         if np.random.rand() < fail_prob:
@@ -96,16 +88,6 @@ class SamplerAgent:
 
 
 class TesterAgent:
-    """
-    Tests a prepared sample under a given condition dict.
-
-    General interface: accepts arbitrary param dict + condition dict.
-    Internally calls the battery surrogate if the right params are
-    present; otherwise returns a placeholder value.
-
-    Phase 3 note: in a real SDL this would call the actual instrument.
-    For the virtual lab, the surrogate is the ground truth.
-    """
     def test(
         self,
         material:   Dict,
@@ -113,20 +95,16 @@ class TesterAgent:
     ) -> float:
         params = material.get("params", {})
 
-        # ── Battery surrogate path ────────────────────────────────────────────
-        # Resolve active_material
         am = (
             params.get("active_material")
             or params.get("am")
             or params.get("active_material_wt")
         )
-        # Resolve porosity
         por = (
             params.get("porosity")
             or params.get("por")
             or params.get("electrode_porosity")
         )
-        # Resolve power from conditions
         power = (
             conditions.get("power_W")
             or conditions.get("power")
@@ -138,23 +116,17 @@ class TesterAgent:
             true_val = predict_f(float(am), float(por), float(power))
             return float(true_val + np.random.normal(0.0, TESTER_NOISE_SIGMA))
 
-        # ── Generic fallback ──────────────────────────────────────────────────
-        # For non-battery domains: return a synthetic value based on
-        # the surrogate of the first two free params.
-        # In Phase 3 this will be replaced by real instrument calls.
         param_values = list(params.values())
         if len(param_values) >= 2:
             x, y = float(param_values[0]), float(param_values[1])
             z = float(list(conditions.values())[0]) if conditions else 100.0
             true_val = predict_f(
-                # Normalise to battery surrogate input range
                 min(98.0, max(88.0, x)),
                 min(60.0, max(20.0, y)),
                 min(250.0, max(50.0, z)),
             )
             return float(true_val + np.random.normal(0.0, TESTER_NOISE_SIGMA))
 
-        # Last resort: return a noisy constant
         return float(50.0 + np.random.normal(0.0, TESTER_NOISE_SIGMA))
 
 
@@ -169,40 +141,30 @@ def get_or_create_result_for_condition(
     condition_label: str,
     condition_value: float,
 ) -> dict:
-    """
-    Find or create a result entry for a given condition.
-    Uses (condition_label, condition_value) as the composite key.
-    Backward compat: also matches on power_W for existing sessions.
-    """
     for r in results_store:
-        # New-style match
         if (
             r.get("condition_label") == condition_label
             and abs(r.get("condition_value", float("nan")) - condition_value) < 1e-9
         ):
             return r
-        # Backward-compat match for old sessions using power_W
         if (
             condition_label in ("power_W", "power")
             and "power_W" in r
             and abs(r["power_W"] - condition_value) < 1e-9
             and r.get("condition_label") is None
         ):
-            # Upgrade in-place
             r["condition_label"] = condition_label
             r["condition_value"] = condition_value
             return r
 
-    # Create new entry
     entry = make_result_entry(condition_label, condition_value)
     results_store.append(entry)
     return entry
 
 
-# ── Phase 2C: resource log helper ─────────────────────────────────────────────
+# ── Phase 2C: resource log ────────────────────────────────────────────────────
 
 def _log_resource(session, tool: str, start_min: int, end_min: int):
-    """Append a resource usage entry for the Gantt timeline."""
     session.resource_log.append({
         "tool":      tool,
         "day":       session.virtual_day_index,
@@ -210,6 +172,308 @@ def _log_resource(session, tool: str, start_min: int, end_min: int):
         "end_min":   end_min,
     })
     session.resource_log = session.resource_log[-200:]
+
+
+# ── DAG variable resolution ───────────────────────────────────────────────────
+
+def _resolve_ref(value: Any, context: Dict[str, Any]) -> Any:
+    """
+    Resolve {{variable}} references in step fields.
+    e.g. "{{sample_id}}" → "S-1-001"
+    """
+    if not isinstance(value, str):
+        return value
+    pattern = re.compile(r"\{\{(\w+)\}\}")
+    match   = pattern.fullmatch(value.strip())
+    if match:
+        var_name = match.group(1)
+        return context.get(var_name, value)
+    return value
+
+
+# ── Sample Registry operations ────────────────────────────────────────────────
+
+def prepare_sample_step(
+    session,
+    step:    dict,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Execute a prepare_sample step.
+
+    Runs SamplerAgent with the given params.
+    On success: creates a Sample in session.sample_registry,
+                stores sample_id in context for downstream steps.
+    On failure: creates a failed Sample, raises so plan can handle.
+
+    Domain-agnostic: params dict can contain any parameter names.
+    """
+    params      = step.get("params", {})
+    instrument  = step.get("instrument", "SamplerAgent")
+    produces    = step.get("produces", "sample_id")
+
+    session.live_event_queue.append(ExecutionEvent(
+        event_type="sampler_start",
+        message=(
+            f"Preparing sample: "
+            + ", ".join(f"{k}={v}" for k, v in params.items())
+        ),
+        equipment="sampler",
+        category="execution",
+        payload={"params": params},
+    ))
+
+    t_before = session.virtual_clock_minutes
+    add_virtual_time(session, VIRTUAL_MIN_SAMPLER)
+    _log_resource(session, "sampler", t_before, session.virtual_clock_minutes)
+
+    result = sampler_agent.sample(params)
+
+    sample_id = generate_sample_id(session)
+    timestamp = format_virtual_time(session.virtual_clock_minutes)
+
+    if result["status"] != "ok":
+        # Create failed sample in registry
+        failed_sample = Sample(
+            sample_id=sample_id,
+            params=params,
+            prepared_by=instrument,
+            status="failed",
+            prepared_at=timestamp,
+            prepared_day=session.virtual_day_index,
+            failure_reason=result.get("reason", "Unknown failure"),
+        )
+        session.sample_registry.append(failed_sample)
+
+        session.live_event_queue.append(ExecutionEvent(
+            event_type="sampler_fail",
+            message=(
+                f"Sample {sample_id} failed: {result.get('reason', 'defect')} "
+                f"(p={result['failure_probability']:.0%})"
+            ),
+            equipment="sampler",
+            category="execution",
+            payload={"sample_id": sample_id, "params": params},
+        ))
+        return {
+            "status":    "failed",
+            "sample_id": sample_id,
+            "reason":    result.get("reason"),
+        }
+
+    # Create successful sample in registry
+    new_sample = Sample(
+        sample_id=sample_id,
+        params=params,
+        prepared_by=instrument,
+        status="prepared",
+        prepared_at=timestamp,
+        prepared_day=session.virtual_day_index,
+    )
+    session.sample_registry.append(new_sample)
+
+    # Store in DAG context for downstream steps
+    context[produces] = sample_id
+
+    session.live_event_queue.append(ExecutionEvent(
+        event_type="sampler_done",
+        message=(
+            f"Sample {sample_id} prepared successfully. "
+            f"Stored in lab inventory."
+        ),
+        equipment="sampler",
+        category="execution",
+        payload={
+            "sample_id": sample_id,
+            "params":    params,
+            "status":    "prepared",
+        },
+    ))
+
+    # Append to agent messages so user can see the sample ID
+    session.agent_state.messages.append({
+        "role":    "assistant",
+        "content": (
+            f"✅ **Sample prepared:** `{sample_id}`\n\n"
+            f"| Parameter | Value |\n"
+            f"|-----------|-------|\n"
+            + "\n".join(
+                f"| {k} | {v} |"
+                for k, v in params.items()
+            )
+            + f"\n\nSample is stored in the lab inventory. "
+            f"You can test it at any time by saying "
+            f"'test sample {sample_id} at [condition]'."
+        ),
+    })
+
+    return {
+        "status":    "ok",
+        "sample_id": sample_id,
+        "params":    params,
+    }
+
+
+def test_sample_step(
+    session,
+    step:    dict,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Execute a test_sample step.
+
+    Looks up sample from registry by sample_id (or {{sample_id}} ref).
+    Runs TesterAgent under given conditions.
+    Appends SampleResult to sample.results.
+
+    Domain-agnostic: conditions and outputs are arbitrary dicts.
+    """
+    # Resolve sample_id — may be a DAG reference
+    sample_ref = _resolve_ref(step.get("sample_ref", ""), context)
+    conditions = step.get("conditions", {})
+    measures   = step.get("measures", "objective")
+    instrument = step.get("instrument", "TesterAgent")
+
+    # Find sample in registry
+    sample = next(
+        (s for s in session.sample_registry if s.sample_id == sample_ref),
+        None,
+    )
+
+    if sample is None:
+        session.live_event_queue.append(ExecutionEvent(
+            event_type="tester_fail",
+            message=f"Sample {sample_ref} not found in registry.",
+            equipment="tester",
+            category="execution",
+            payload={"sample_ref": sample_ref},
+        ))
+        return {"status": "error", "message": f"Sample {sample_ref} not found"}
+
+    if sample.status == "failed":
+        return {
+            "status":  "error",
+            "message": f"Sample {sample_ref} failed preparation — cannot test",
+        }
+
+    session.live_event_queue.append(ExecutionEvent(
+        event_type="tester_start",
+        message=(
+            f"Testing sample {sample_ref}: "
+            + ", ".join(f"{k}={v}" for k, v in conditions.items())
+        ),
+        equipment="tester",
+        category="execution",
+        payload={"sample_id": sample_ref, "conditions": conditions},
+    ))
+
+    t_before = session.virtual_clock_minutes
+    add_virtual_time(session, VIRTUAL_MIN_TESTER)
+    _log_resource(session, "tester", t_before, session.virtual_clock_minutes)
+
+    material = {"params": sample.params}
+    value    = tester_agent.test(material, conditions)
+
+    timestamp = format_virtual_time(session.virtual_clock_minutes)
+
+    # Create SampleResult
+    result = SampleResult(
+        tested_by=instrument,
+        conditions=conditions,
+        outputs={measures: value},
+        tested_at=timestamp,
+        tested_day=session.virtual_day_index,
+    )
+    sample.results.append(result)
+    sample.status = "tested"
+
+    # Write to DB for SQL queryability
+    am    = sample.params.get("active_material", sample.params.get("am", 0.0))
+    por   = sample.params.get("porosity", sample.params.get("por", 0.0))
+    power = conditions.get("power_W", conditions.get("power", 0.0))
+    write_evaluation(float(power), float(am), float(por), value, timestamp)
+
+    session.live_event_queue.append(ExecutionEvent(
+        event_type="tester_done",
+        message=(
+            f"Sample {sample_ref}: {measures} = {value:.4f} "
+            f"@ {', '.join(f'{k}={v}' for k, v in conditions.items())}"
+        ),
+        equipment="tester",
+        category="analysis",
+        payload={
+            "sample_id":  sample_ref,
+            "conditions": conditions,
+            "outputs":    {measures: value},
+        },
+    ))
+    session.live_event_queue.append(ExecutionEvent(
+        event_type="memory_update",
+        message="Recording result to experimental database.",
+        equipment="memory",
+        category="analysis",
+        payload={},
+    ))
+
+    # Append result to agent messages
+    session.agent_state.messages.append({
+        "role":    "assistant",
+        "content": (
+            f"⚡ **Test result for `{sample_ref}`:**\n\n"
+            f"| | |\n|---|---|\n"
+            + "\n".join(
+                f"| {k} | {v} |"
+                for k, v in conditions.items()
+            )
+            + "\n"
+            + "\n".join(
+                f"| **{k}** | **{v:.4f}** |"
+                for k, v in {measures: value}.items()
+            )
+        ),
+    })
+
+    return {
+        "status":     "ok",
+        "sample_id":  sample_ref,
+        "conditions": conditions,
+        "outputs":    {measures: value},
+    }
+
+
+def list_samples_step(session) -> Dict[str, Any]:
+    """Return a summary of all samples in the registry."""
+    samples = session.sample_registry
+    if not samples:
+        session.agent_state.messages.append({
+            "role":    "assistant",
+            "content": "No samples in the lab inventory yet.",
+        })
+        return {"status": "ok", "count": 0, "samples": []}
+
+    lines = [
+        f"## Lab Sample Inventory ({len(samples)} samples)\n",
+        "| Sample ID | Parameters | Status | Prepared | Results |",
+        "|-----------|------------|--------|----------|---------|",
+    ]
+    for s in samples:
+        params_str  = ", ".join(f"{k}={v}" for k, v in s.params.items())
+        results_str = f"{len(s.results)} test(s)" if s.results else "untested"
+        lines.append(
+            f"| `{s.sample_id}` | {params_str} | {s.status} | "
+            f"Day {s.prepared_day} {s.prepared_at} | {results_str} |"
+        )
+
+    session.agent_state.messages.append({
+        "role":    "assistant",
+        "content": "\n".join(lines),
+    })
+
+    return {
+        "status":  "ok",
+        "count":   len(samples),
+        "samples": [s.model_dump() for s in samples],
+    }
 
 
 # ── General BO execution engine ───────────────────────────────────────────────
@@ -221,36 +485,18 @@ def expand_optimise_condition_to_events(
 ) -> List[ExecutionEvent]:
     """
     Run a full GP-BO loop for one operating condition value.
-
     Phase 3: fully domain-agnostic.
-    - condition_label / condition_value replace power_W
-    - free_params is a list of {name, min, max, unit} dicts
-    - objective_metric is the name of the thing being maximised
-    - Results stored via make_result_entry() with general fields
-    - Backward compat fields (power_W, best_energy, best_am, best_por)
-      still populated where applicable
-
-    Parameters in step dict:
-        condition_label:  str   e.g. "power_W", "temperature_C"
-        condition_value:  float e.g. 150.0, 300.0
-        free_params:      list  [{name, min, max, unit}, ...]
-        objective_metric: str   e.g. "specific_energy", "CO2_conversion"
-        n_calls:          int
-        n_initial_points: int
     """
     condition_label  = step["condition_label"]
     condition_value  = float(step["condition_value"])
-    free_params      = step["free_params"]       # [{name, min, max, unit}]
+    free_params      = step["free_params"]
     objective_metric = step.get("objective_metric", "objective")
     n_calls          = int(step["n_calls"])
     n_init           = int(step["n_initial_points"])
-
-    # Build condition dict for tester
-    conditions = {condition_label: condition_value}
+    conditions       = {condition_label: condition_value}
 
     events: List[ExecutionEvent] = []
 
-    # ── Start event ───────────────────────────────────────────────────────────
     param_summary = ", ".join(
         f"{p['name']} [{p['min']}–{p['max']} {p.get('unit','')}]"
         for p in free_params
@@ -271,14 +517,12 @@ def expand_optimise_condition_to_events(
         },
     ))
 
-    # ── Time check ────────────────────────────────────────────────────────────
     feasible = max_successes_fit_in_remaining_time(session)
     adjusted = min(n_calls, feasible)
     res      = get_or_create_result_for_condition(
         results_store, condition_label, condition_value
     )
 
-    # Populate param_names on first creation
     if not res.get("param_names"):
         res["param_names"] = [p["name"] for p in free_params]
 
@@ -299,7 +543,6 @@ def expand_optimise_condition_to_events(
         ))
         return events
 
-    # ── Build skopt Optimizer ─────────────────────────────────────────────────
     dimensions = [
         Real(float(p["min"]), float(p["max"]), name=p["name"])
         for p in free_params
@@ -312,7 +555,6 @@ def expand_optimise_condition_to_events(
         random_state=42,
     )
 
-    # ── BO loop ───────────────────────────────────────────────────────────────
     best_objective = res.get("best_objective")
     successes      = 0
     attempts       = 0
@@ -320,8 +562,6 @@ def expand_optimise_condition_to_events(
     max_attempts   = max(adjusted, adjusted * MAX_TOTAL_ATTEMPTS_FACTOR)
 
     while successes < adjusted and attempts < max_attempts:
-
-        # Time check
         remaining = lab_minutes_remaining(session)
         if remaining < (VIRTUAL_MIN_SAMPLER + VIRTUAL_MIN_TESTER):
             events.append(ExecutionEvent(
@@ -337,9 +577,9 @@ def expand_optimise_condition_to_events(
                     "condition_label": condition_label,
                     "condition_value": condition_value,
                     "completed":       successes,
+                    "requested":       adjusted,
                 },
             ))
-            # Record outstanding task
             remaining_calls = adjusted - successes
             if remaining_calls > 0:
                 session.outstanding_tasks.append({
@@ -348,24 +588,21 @@ def expand_optimise_condition_to_events(
                     "condition_value":   condition_value,
                     "condition_unit":    step.get("condition_unit", ""),
                     "remaining_n_calls": remaining_calls,
+                    "completed_calls":   successes,
                     "free_params":       free_params,
                     "objective_metric":  objective_metric,
-                    # Backward compat
                     "power_W":           condition_value,
                 })
             break
 
-        # ── BO suggestion ─────────────────────────────────────────────────────
-        suggestion  = opt.ask()
-        param_dict  = {
+        suggestion = opt.ask()
+        param_dict = {
             p["name"]: float(v)
             for p, v in zip(free_params, suggestion)
         }
         attempts += 1
 
-        param_str = ", ".join(
-            f"{k}={v:.3f}" for k, v in param_dict.items()
-        )
+        param_str = ", ".join(f"{k}={v:.3f}" for k, v in param_dict.items())
         events.append(ExecutionEvent(
             event_type="candidate_proposed",
             message=(
@@ -397,6 +634,24 @@ def expand_optimise_condition_to_events(
 
         if material["status"] != "ok":
             failed_samples += 1
+
+            # Register failed sample in registry
+            failed_id        = generate_sample_id(session)
+            failed_timestamp = format_virtual_time(session.virtual_clock_minutes)
+            session.sample_registry.append(Sample(
+                sample_id=failed_id,
+                params=param_dict,
+                prepared_by="SamplerAgent",
+                status="failed",
+                prepared_at=failed_timestamp,
+                prepared_day=session.virtual_day_index,
+                failure_reason="Electrode preparation defect",
+                notes=(
+                    f"BO iteration attempt @ "
+                    f"{condition_label}={condition_value}"
+                ),
+            ))
+
             events.append(ExecutionEvent(
                 event_type="sampler_fail",
                 message=(
@@ -409,16 +664,36 @@ def expand_optimise_condition_to_events(
             ))
             continue
 
+        # ── Register successful sample in registry ────────────────────────────
+        # Every prepared sample — whether from BO or ad-hoc — is registered.
+        # This gives the user a full inventory of all lab work done.
+        bo_sample_id  = generate_sample_id(session)
+        bo_timestamp  = format_virtual_time(session.virtual_clock_minutes)
+        bo_sample     = Sample(
+            sample_id=bo_sample_id,
+            params=param_dict,
+            prepared_by="SamplerAgent",
+            status="prepared",
+            prepared_at=bo_timestamp,
+            prepared_day=session.virtual_day_index,
+            notes=(
+                f"BO iteration {successes + 1} @ "
+                f"{condition_label}={condition_value}"
+            ),
+        )
+        session.sample_registry.append(bo_sample)
+
         # ── Tester ────────────────────────────────────────────────────────────
         events.append(ExecutionEvent(
             event_type="tester_start",
             message=(
-                f"Testing at {condition_label}="
+                f"Testing {bo_sample_id} at {condition_label}="
                 f"{condition_value} {step.get('condition_unit', '')}..."
             ),
             equipment="tester",
             category="execution",
             payload={
+                "sample_id":       bo_sample_id,
                 "condition_label": condition_label,
                 "condition_value": condition_value,
             },
@@ -433,25 +708,21 @@ def expand_optimise_condition_to_events(
 
         timestamp = format_virtual_time(session.virtual_clock_minutes)
 
+        # ── Update sample registry with test result ───────────────────────────
+        bo_sample.status = "tested"
+        bo_sample.results.append(SampleResult(
+            tested_by="TesterAgent",
+            conditions=dict(conditions),
+            outputs={objective_metric: objective_value},
+            tested_at=timestamp,
+            tested_day=session.virtual_day_index,
+        ))
+
         # ── Persist to DB ─────────────────────────────────────────────────────
-        # Write to DB using general fields; battery-specific fields
-        # populated where available for backward compat
-        am  = param_dict.get(
-            "active_material",
-            param_dict.get("am", 0.0)
-        )
-        por = param_dict.get(
-            "porosity",
-            param_dict.get("por", 0.0)
-        )
-        power = conditions.get(
-            "power_W",
-            conditions.get("power", condition_value)
-        )
-        write_evaluation(
-            float(power), float(am), float(por),
-            objective_value, timestamp,
-        )
+        am    = param_dict.get("active_material", param_dict.get("am", 0.0))
+        por   = param_dict.get("porosity", param_dict.get("por", 0.0))
+        power = conditions.get("power_W", conditions.get("power", condition_value))
+        write_evaluation(float(power), float(am), float(por), objective_value, timestamp)
 
         # ── Update results store ──────────────────────────────────────────────
         res["X"].append(list(suggestion))
@@ -461,18 +732,15 @@ def expand_optimise_condition_to_events(
         res["param_names"]    = [p["name"] for p in free_params]
 
         if best_objective is None or objective_value > best_objective:
-            best_objective          = objective_value
-            res["best_objective"]   = objective_value
-            res["best_energy"]      = objective_value   # backward compat
-            res["best_params"]      = dict(param_dict)
-
-            # Backward compat: populate best_am / best_por if present
+            best_objective        = objective_value
+            res["best_objective"] = objective_value
+            res["best_energy"]    = objective_value
+            res["best_params"]    = dict(param_dict)
             if "active_material" in param_dict:
                 res["best_am"]  = param_dict["active_material"]
             if "porosity" in param_dict:
                 res["best_por"] = param_dict["porosity"]
 
-        # ── Result event ──────────────────────────────────────────────────────
         events.append(ExecutionEvent(
             event_type="tester_done",
             message=(
@@ -482,7 +750,7 @@ def expand_optimise_condition_to_events(
             equipment="tester",
             category="analysis",
             payload={
-                "objective_value": objective_value,
+                "objective_value":  objective_value,
                 "objective_metric": objective_metric,
                 "params":           param_dict,
                 "condition_label":  condition_label,
@@ -497,7 +765,6 @@ def expand_optimise_condition_to_events(
             payload={},
         ))
 
-    # ── Completion event ──────────────────────────────────────────────────────
     best_str = f"{best_objective:.4f}" if best_objective is not None else "N/A"
     events.append(ExecutionEvent(
         event_type="optimiser_complete",
@@ -517,31 +784,18 @@ def expand_optimise_condition_to_events(
     return events
 
 
-# ── Backward-compat wrapper ───────────────────────────────────────────────────
-
 def expand_optimise_power_to_events(
-    session,
-    step:          dict,
-    results_store: List[dict],
+    session, step: dict, results_store: List[dict]
 ) -> List[ExecutionEvent]:
-    """
-    Backward-compatible wrapper around expand_optimise_condition_to_events.
-    Translates old-style power-specific step dicts to the new general format.
-    Called when the plan contains old-style "optimise_power" steps.
-    """
-    power_W  = float(step["power_W"])
-    am_min   = float(step.get("am_min",  88.0))
-    am_max   = float(step.get("am_max",  98.0))
-    por_min  = float(step.get("por_min", 20.0))
-    por_max  = float(step.get("por_max", 60.0))
-
+    """Backward-compat wrapper."""
+    power_W = float(step["power_W"])
     general_step = {
         "condition_label":  "power_W",
         "condition_value":  power_W,
         "condition_unit":   "W",
         "free_params": [
-            {"name": "active_material", "min": am_min, "max": am_max, "unit": "wt%"},
-            {"name": "porosity",        "min": por_min,"max": por_max,"unit": "%"},
+            {"name": "active_material", "min": float(step.get("am_min", 88.0)),  "max": float(step.get("am_max", 98.0)),  "unit": "wt%"},
+            {"name": "porosity",        "min": float(step.get("por_min", 20.0)), "max": float(step.get("por_max", 60.0)), "unit": "%"},
         ],
         "objective_metric": "specific_energy",
         "n_calls":          int(step.get("n_calls", 20)),
@@ -553,15 +807,6 @@ def expand_optimise_power_to_events(
 # ── Plotter ───────────────────────────────────────────────────────────────────
 
 def plotter(results: List[dict], out_file: str = None) -> str:
-    """
-    Generate a multi-panel summary figure.
-
-    Phase 3: domain-agnostic labels derived from result entries.
-    - condition_label used for subplot titles
-    - param_names used for axis labels
-    - objective_metric from payload used for colorbar label
-    Falls back to battery-specific labels for backward compat.
-    """
     if out_file is None:
         tmp = tempfile.NamedTemporaryFile(
             suffix=".png", prefix="maestro_plot_", delete=False
@@ -569,109 +814,67 @@ def plotter(results: List[dict], out_file: str = None) -> str:
         out_file = tmp.name
         tmp.close()
 
-    n_cols   = 3
-    n_total  = len(results) + 1
-    n_rows   = math.ceil(n_total / n_cols)
-    fig, axes = plt.subplots(
-        n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows)
-    )
-    axes = np.atleast_1d(axes).ravel()
+    n_cols    = 3
+    n_total   = len(results) + 1
+    n_rows    = math.ceil(n_total / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+    axes      = np.atleast_1d(axes).ravel()
 
     for i, res in enumerate(results[:len(axes) - 1]):
         ax = axes[i]
-
-        # ── Labels ────────────────────────────────────────────────────────────
         condition_label = res.get("condition_label", "power_W")
         condition_value = res.get("condition_value", res.get("power_W", 0))
         param_names     = res.get("param_names", ["param_1", "param_2"])
         x_label         = param_names[0] if len(param_names) > 0 else "param_1"
         y_label         = param_names[1] if len(param_names) > 1 else "param_2"
-        obj_label       = "Objective"
-
-        title = f"{condition_label}={condition_value}"
+        title           = f"{condition_label}={condition_value}"
 
         if not res["X"]:
-            ax.set_title(title)
-            ax.set_axis_off()
-            continue
+            ax.set_title(title); ax.set_axis_off(); continue
 
         X  = np.array(res["X"])
         y  = np.array(res["y"])
         sc = ax.scatter(
-            X[:, 0], X[:, 1] if X.shape[1] > 1 else np.zeros(len(X)),
+            X[:, 0],
+            X[:, 1] if X.shape[1] > 1 else np.zeros(len(X)),
             c=y, cmap="plasma", s=40,
         )
-
-        # Best point marker
-        best_params = res.get("best_params", {})
-        best_x = best_params.get(x_label)
-        best_y = best_params.get(y_label)
-
-        # Fallback to legacy fields
-        if best_x is None:
-            best_x = res.get("best_am")
-        if best_y is None:
-            best_y = res.get("best_por")
-
+        bp    = res.get("best_params", {})
+        best_x = bp.get(x_label, res.get("best_am"))
+        best_y = bp.get(y_label, res.get("best_por"))
         if best_x is not None and best_y is not None:
-            ax.scatter(
-                [best_x], [best_y],
-                facecolors="none", edgecolors="black",
-                s=120, linewidths=1.5, label="Best",
-            )
+            ax.scatter([best_x], [best_y], facecolors="none", edgecolors="black", s=120, linewidths=1.5, label="Best")
             ax.legend(fontsize=7)
-
         ax.set_title(title, fontsize=9)
         ax.set_xlabel(x_label, fontsize=8)
         ax.set_ylabel(y_label, fontsize=8)
-        fig.colorbar(sc, ax=ax).set_label(obj_label, fontsize=7)
+        fig.colorbar(sc, ax=ax).set_label("Objective", fontsize=7)
 
-    # Hide unused axes
     for ax in axes[len(results):-1]:
         ax.set_visible(False)
 
-    # ── Optimal parameter path ────────────────────────────────────────────────
     ax_path = axes[-1]
-    valid   = [
-        r for r in results
-        if r.get("best_params") or r.get("best_am") is not None
-    ]
-
+    valid   = [r for r in results if r.get("best_params") or r.get("best_am") is not None]
     if valid:
-        # Sort by condition value
         valid.sort(key=lambda r: r.get("condition_value", r.get("power_W", 0)))
-
-        condition_values = [
-            r.get("condition_value", r.get("power_W", 0)) for r in valid
-        ]
-        condition_label = valid[0].get("condition_label", "power_W")
-        param_names     = valid[0].get("param_names", ["param_1", "param_2"])
-        x_label         = param_names[0] if len(param_names) > 0 else "param_1"
-        y_label         = param_names[1] if len(param_names) > 1 else "param_2"
-
-        xs, ys, objs = [], [], []
+        param_names = valid[0].get("param_names", ["param_1", "param_2"])
+        x_label     = param_names[0] if len(param_names) > 0 else "param_1"
+        y_label     = param_names[1] if len(param_names) > 1 else "param_2"
+        xs, ys, objs, cvs = [], [], [], []
         for r in valid:
-            bp = r.get("best_params", {})
-            x  = bp.get(x_label, r.get("best_am"))
-            y  = bp.get(y_label, r.get("best_por"))
-            o  = r.get("best_objective", r.get("best_energy", 0))
+            bp  = r.get("best_params", {})
+            x   = bp.get(x_label, r.get("best_am"))
+            y   = bp.get(y_label, r.get("best_por"))
+            o   = r.get("best_objective", r.get("best_energy", 0))
+            cv  = r.get("condition_value", r.get("power_W", 0))
             if x is not None and y is not None:
-                xs.append(float(x))
-                ys.append(float(y))
-                objs.append(float(o) if o is not None else 0.0)
-
+                xs.append(float(x)); ys.append(float(y))
+                objs.append(float(o) if o else 0.0); cvs.append(cv)
         if xs:
             ax_path.plot(xs, ys, "-k", lw=1.5, alpha=0.6)
-            sc2 = ax_path.scatter(
-                xs, ys, c=objs, cmap="viridis", s=60, edgecolors="black"
-            )
-            for x, y, cv in zip(xs, ys, condition_values):
-                ax_path.text(
-                    x + 0.02 * (max(xs) - min(xs) + 1e-9),
-                    y,
-                    f"{cv}",
-                    fontsize=7,
-                )
+            sc2 = ax_path.scatter(xs, ys, c=objs, cmap="viridis", s=60, edgecolors="black")
+            for x, y, cv in zip(xs, ys, cvs):
+                ax_path.text(x + 0.02 * (max(xs) - min(xs) + 1e-9), y, f"{cv}", fontsize=7)
             ax_path.set_title("Optimal parameter path", fontsize=9)
             ax_path.set_xlabel(x_label, fontsize=8)
             ax_path.set_ylabel(y_label, fontsize=8)
@@ -689,13 +892,25 @@ def plotter(results: List[dict], out_file: str = None) -> str:
 
 # ── Plan execution ────────────────────────────────────────────────────────────
 
-def execute_plan_step(session, step: dict, query_database_fn) -> Dict:
+def execute_plan_step(
+    session,
+    step:              dict,
+    query_database_fn,
+    dag_context:       Optional[Dict[str, Any]] = None,
+) -> Dict:
     """
     Execute one step of the approved workflow plan.
 
-    Phase 3: handles both new-style "optimise_condition" steps and
-    old-style "optimise_power" steps for backward compatibility.
+    Phase 3: handles WorkflowStep kinds including prepare_sample,
+    test_sample, list_samples, optimise_condition, and legacy kinds.
+
+    dag_context: shared dict for passing outputs between steps
+                 e.g. step 1 sets context["sample_id"] = "S-1-001"
+                      step 2 reads context["sample_id"]
     """
+    if dag_context is None:
+        dag_context = {}
+
     results_store = session.agent_state.results_store
     kind          = step["kind"]
 
@@ -712,8 +927,6 @@ def execute_plan_step(session, step: dict, query_database_fn) -> Dict:
     # ── Feasibility extraction ────────────────────────────────────────────────
     if kind == "extract_feasibility":
         from app.core.extraction import extract_case_study_to_campaign
-        from app.core.skills import describe_extracted_campaign
-
         case_name = step.get("case_name", "Case Study")
 
         session.live_event_queue.append(ExecutionEvent(
@@ -727,8 +940,7 @@ def execute_plan_step(session, step: dict, query_database_fn) -> Dict:
             session.agent_state.messages.append({
                 "role":    "assistant",
                 "content": (
-                    "I need a paper to be uploaded before I can check "
-                    "feasibility. Please attach a PDF using the 📎 button."
+                    "I need a paper to be uploaded before I can check feasibility."
                 ),
             })
             return {"status": "error", "message": "No document uploaded"}
@@ -738,8 +950,6 @@ def execute_plan_step(session, step: dict, query_database_fn) -> Dict:
                 session.active_document_id, case_name
             )
             session.extracted_campaign = extraction.campaign
-
-            # Update active_condition_key from extracted campaign
             ocs = extraction.campaign.operating_conditions
             if ocs:
                 session.active_condition_key = ocs[0].get("name", "power_W")
@@ -749,15 +959,11 @@ def execute_plan_step(session, step: dict, query_database_fn) -> Dict:
 
             session.live_event_queue.append(ExecutionEvent(
                 event_type="feasibility_result",
-                message=(
-                    f"Feasibility: "
-                    f"{'✅ Feasible' if is_feasible else '⚠️ Partial/Not feasible'}"
-                ),
+                message=f"Feasibility: {'✅ Feasible' if is_feasible else '⚠️ Partial'}",
                 equipment="knowledge",
                 category="knowledge",
             ))
 
-            # ── Feasibility report ────────────────────────────────────────────
             missing_p = feasibility.get("missing_params", [])
             missing_o = feasibility.get("missing_outputs", [])
 
@@ -770,11 +976,9 @@ def execute_plan_step(session, step: dict, query_database_fn) -> Dict:
             for p in extraction.campaign.parameter_space:
                 ok = p["name"] not in missing_p
                 lines.append(
-                    f"- `{p['name']}` "
-                    f"({p.get('min')}–{p.get('max')} {p.get('unit', '')}) "
-                    f"{'✅' if ok else '❌ not available in current lab'}"
+                    f"- `{p['name']}` ({p.get('min')}–{p.get('max')} {p.get('unit', '')}) "
+                    f"{'✅' if ok else '❌ not available'}"
                 )
-
             if extraction.campaign.operating_conditions:
                 lines.append("\n### Operating Conditions (separate runs)")
                 for oc in extraction.campaign.operating_conditions:
@@ -783,52 +987,27 @@ def execute_plan_step(session, step: dict, query_database_fn) -> Dict:
                         f"- `{oc['name']}`: {vals} {oc.get('unit', '')} "
                         f"→ {len(vals)} separate BO campaigns"
                     )
-
             lines += [
                 f"\n### Output",
                 f"- `{extraction.campaign.objective_metric}` "
                 f"{'✅ measurable' if not missing_o else '❌ not measurable'}",
                 f"\n### Verdict",
             ]
-
             if is_feasible:
                 n_runs = sum(
                     len(oc.get("values", []))
                     for oc in extraction.campaign.operating_conditions
                 ) or 1
                 lines.append(
-                    f"✅ **Fully reproducible** with the current virtual lab.\n"
+                    f"✅ **Fully reproducible.** "
                     f"This will run **{n_runs} separate BO campaigns**.\n"
-                    f"Say **'run it'** or **'execute the campaign'** to proceed."
+                    f"Say **'run it'** to proceed."
                 )
             else:
                 lines.append(
                     f"⚠️ **Partially feasible.** "
-                    f"Missing: {missing_p + missing_o}. "
-                    f"Add the required tools in the Lab Builder."
+                    f"Missing: {missing_p + missing_o}."
                 )
-
-            # Reference figures
-            if extraction.campaign.source_document_id:
-                from app.core.documents import get_document
-                try:
-                    doc = get_document(extraction.campaign.source_document_id)
-                    for s in doc.sections:
-                        if case_name.lower() in s.heading.lower():
-                            figs = get_figures_for_section(
-                                extraction.campaign.source_document_id,
-                                s.heading,
-                            )
-                            if figs:
-                                lines.append("\n### Reference Figures")
-                                for fig in figs[:3]:
-                                    lines.append(
-                                        f"![{fig.caption}]"
-                                        f"(/api{fig.served_url})"
-                                    )
-                            break
-                except Exception:
-                    pass
 
             if extraction.campaign.assumptions:
                 lines.append("\n### Assumptions")
@@ -836,33 +1015,38 @@ def execute_plan_step(session, step: dict, query_database_fn) -> Dict:
                     lines.append(f"- {a}")
 
             session.agent_state.messages.append({
-                "role":    "assistant",
-                "content": "\n".join(lines),
+                "role": "assistant", "content": "\n".join(lines),
             })
             return {"status": "ok", "feasible": is_feasible}
 
         except Exception as e:
             session.agent_state.messages.append({
-                "role":    "assistant",
-                "content": (
-                    f"I encountered an error extracting the campaign: `{e}`"
-                ),
+                "role": "assistant",
+                "content": f"Error extracting campaign: `{e}`",
             })
             return {"status": "error", "message": str(e)}
 
-    # ── General condition BO (Phase 3) ────────────────────────────────────────
+    # ── Prepare sample (Phase 3) ──────────────────────────────────────────────
+    if kind == "prepare_sample":
+        return prepare_sample_step(session, step, dag_context)
+
+    # ── Test sample (Phase 3) ─────────────────────────────────────────────────
+    if kind == "test_sample":
+        return test_sample_step(session, step, dag_context)
+
+    # ── List samples (Phase 3) ────────────────────────────────────────────────
+    if kind == "list_samples":
+        return list_samples_step(session)
+
+    # ── General condition BO ──────────────────────────────────────────────────
     if kind == "optimise_condition":
-        events = expand_optimise_condition_to_events(
-            session, step, results_store
-        )
+        events = expand_optimise_condition_to_events(session, step, results_store)
         session.live_event_queue.extend(events)
         return {"status": "ok"}
 
-    # ── Legacy power BO (backward compat) ─────────────────────────────────────
+    # ── Legacy power BO ───────────────────────────────────────────────────────
     if kind == "optimise_power":
-        events = expand_optimise_power_to_events(
-            session, step, results_store
-        )
+        events = expand_optimise_power_to_events(session, step, results_store)
         session.live_event_queue.extend(events)
         return {"status": "ok"}
 
@@ -907,15 +1091,8 @@ def build_execution_plan_from_tool_calls(
     """
     Convert LLM tool calls into a concrete execution plan.
 
-    Phase 3: fully driven by CampaignSpec structure.
-    - Iterates over ANY operating conditions, not just power_W
-    - Uses ANY free parameters from parameter_space
-    - Handles single condition dimension with multiple values
-    - Backward compat: falls back gracefully if campaign uses old structure
-
-    IMPORTANT: extract_and_check_feasibility is NOT added to the
-    background job plan — it runs synchronously in confirm_pending().
-    Only experiment execution steps go into the background job.
+    Phase 3: handles plan_workflow, prepare_sample, test_sample,
+    list_samples in addition to existing tool calls.
     """
     plan: List[dict] = []
 
@@ -928,8 +1105,14 @@ def build_execution_plan_from_tool_calls(
             pass
 
         if name == "extract_and_check_feasibility":
-            # Runs synchronously — NOT in background job
-            pass
+            pass  # runs synchronously in confirm_pending
+
+        elif name == "plan_workflow":
+            # The LLM has proposed a structured plan
+            # Convert WorkflowStep dicts directly to plan steps
+            steps = args.get("steps", [])
+            for step in steps:
+                plan.append(step)
 
         elif name == "run_extracted_campaign":
             plan.append({
@@ -938,35 +1121,20 @@ def build_execution_plan_from_tool_calls(
                 "equipment": "knowledge",
                 "category":  "knowledge",
             })
-
             if session.extracted_campaign is None:
                 plan.append({
                     "kind":      "narration",
-                    "message":   (
-                        "No campaign extracted yet. "
-                        "Please extract a campaign first."
-                    ),
+                    "message":   "No campaign extracted yet.",
                     "equipment": "knowledge",
                     "category":  "knowledge",
                 })
                 continue
 
-            c = session.extracted_campaign
+            c          = session.extracted_campaign
+            param_lookup = {p["name"].lower(): p for p in c.parameter_space}
 
-            # ── Resolve free parameters ───────────────────────────────────────
-            # Build a lookup by name (case-insensitive)
-            param_lookup = {
-                p["name"].lower(): p
-                for p in c.parameter_space
-            }
-
-            # ── Resolve operating conditions ──────────────────────────────────
             operating_conditions = c.operating_conditions
-
             if not operating_conditions:
-                # No operating conditions extracted — this shouldn't happen
-                # after our extraction fix, but handle gracefully:
-                # Run a single BO campaign with no fixed condition
                 plan.append({
                     "kind":             "optimise_condition",
                     "condition_label":  "run",
@@ -979,8 +1147,6 @@ def build_execution_plan_from_tool_calls(
                 })
                 continue
 
-            # ── One BO campaign per condition value ───────────────────────────
-            # Update session's active condition key
             primary_oc = operating_conditions[0]
             session.active_condition_key = primary_oc.get("name", "power_W")
 
@@ -988,10 +1154,8 @@ def build_execution_plan_from_tool_calls(
                 oc_name   = oc.get("name", "condition")
                 oc_unit   = oc.get("unit", "")
                 oc_values = oc.get("values", [])
-
                 if not oc_values:
                     continue
-
                 for value in oc_values:
                     plan.append({
                         "kind":             "optimise_condition",
@@ -1003,6 +1167,28 @@ def build_execution_plan_from_tool_calls(
                         "n_calls":          20,
                         "n_initial_points": 6,
                     })
+
+        elif name == "prepare_sample":
+            plan.append({
+                "kind":       "prepare_sample",
+                "label":      f"Prepare sample: {args.get('params', {})}",
+                "instrument": args.get("instrument", "SamplerAgent"),
+                "params":     args.get("params", {}),
+                "produces":   args.get("produces", "sample_id"),
+            })
+
+        elif name == "test_sample":
+            plan.append({
+                "kind":       "test_sample",
+                "label":      f"Test sample {args.get('sample_id', '?')}",
+                "instrument": args.get("instrument", "TesterAgent"),
+                "sample_ref": args.get("sample_id", "{{sample_id}}"),
+                "conditions": args.get("conditions", {}),
+                "measures":   args.get("measures", "specific_energy"),
+            })
+
+        elif name == "list_samples":
+            plan.append({"kind": "list_samples"})
 
         elif name == "plotter":
             plan.append({"kind": "plotter"})
@@ -1017,70 +1203,45 @@ def build_execution_plan_from_tool_calls(
     return plan
 
 
-def _resolve_free_params(
-    param_lookup: Dict[str, dict],
-) -> List[dict]:
-    """
-    Build the free_params list for a BO step from the campaign's
-    parameter_space lookup dict.
-
-    Returns a list of {name, min, max, unit} dicts with sensible
-    defaults if bounds are missing.
-    """
+def _resolve_free_params(param_lookup: Dict[str, dict]) -> List[dict]:
     free_params = []
     for name, p in param_lookup.items():
         p_min = p.get("min")
         p_max = p.get("max")
-
-        # Skip params with no bounds — can't run BO without them
         if p_min is None or p_max is None:
             continue
-
         free_params.append({
             "name": p.get("name", name),
             "min":  float(p_min),
             "max":  float(p_max),
             "unit": p.get("unit", ""),
         })
-
     return free_params
 
 
 # ── Timeline builder ──────────────────────────────────────────────────────────
 
 def build_dynamic_timeline(session) -> List[dict]:
-    """Build the campaign progress timeline for the right panel."""
     items: List[dict] = []
 
     if session.active_document_id:
         items.append({"label": "Paper uploaded", "status": "done"})
 
     if session.extracted_campaign:
-        c = session.extracted_campaign
-        # Show condition summary
+        c   = session.extracted_campaign
         ocs = c.operating_conditions
         if ocs:
-            oc      = ocs[0]
-            n_runs  = len(oc.get("values", []))
-            oc_name = oc.get("name", "condition")
+            oc     = ocs[0]
+            n_runs = len(oc.get("values", []))
             items.append({
-                "label":  (
-                    f"Campaign: {c.target_case_study} "
-                    f"({n_runs} {oc_name} runs)"
-                ),
+                "label":  f"Campaign: {c.target_case_study} ({n_runs} {oc.get('name','condition')} runs)",
                 "status": "done",
             })
         else:
-            items.append({
-                "label":  f"Campaign: {c.target_case_study}",
-                "status": "done",
-            })
+            items.append({"label": f"Campaign: {c.target_case_study}", "status": "done"})
 
     if session.agent_state.awaiting_confirmation:
-        items.append({
-            "label":  "Awaiting workflow approval",
-            "status": "active",
-        })
+        items.append({"label": "Awaiting workflow approval", "status": "active"})
 
     if session.background_job_active:
         items.append({
@@ -1091,21 +1252,25 @@ def build_dynamic_timeline(session) -> List[dict]:
     for t in session.outstanding_tasks[:3]:
         cond_label = t.get("condition_label", "condition")
         cond_value = t.get("condition_value", t.get("power_W", "?"))
+        completed  = t.get("completed_calls", 0)
+        remaining  = t.get("remaining_n_calls", 0)
         items.append({
-            "label": (
-                f"Pending: {cond_label}={cond_value} "
-                f"({int(t['remaining_n_calls'])} evals)"
-            ),
+            "label":  f"Incomplete: {cond_label}={cond_value} ({completed} done, {remaining} remaining)",
             "status": "pending",
+        })
+
+    if session.sample_registry:
+        n_prepared = sum(1 for s in session.sample_registry if s.status == "prepared")
+        n_tested   = sum(1 for s in session.sample_registry if s.status == "tested")
+        items.append({
+            "label":  f"Samples: {n_prepared} prepared, {n_tested} tested",
+            "status": "done",
         })
 
     if session.show_plotter_image:
         items.append({"label": "Summary figure generated", "status": "done"})
 
     if not items:
-        items.append({
-            "label":  "Waiting for scientific task",
-            "status": "pending",
-        })
+        items.append({"label": "Waiting for scientific task", "status": "pending"})
 
     return items

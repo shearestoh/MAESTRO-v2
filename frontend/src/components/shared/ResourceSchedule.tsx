@@ -17,9 +17,9 @@ const TOOL_LABELS: Record<string, string> = {
 };
 
 export function ResourceSchedule() {
-  const state   = useMaestroStore((s) => s.state);
-  const nextDay = useMaestroStore((s) => s.nextDay);
-  const bgActive= useMaestroStore((s) => s.state?.background_job_active ?? false);
+  const state     = useMaestroStore((s) => s.state);
+  const nextDay   = useMaestroStore((s) => s.nextDay);
+  const bgActive  = useMaestroStore((s) => s.state?.background_job_active ?? false);
   const isLoading = useMaestroStore((s) => s.isLoading);
 
   if (!state) return null;
@@ -36,7 +36,7 @@ export function ResourceSchedule() {
   // Filter log to current day only
   const todayLog = (resource_log ?? []).filter((e) => e.day === day);
 
-  // Only sampler, tester, optimiser on Gantt (memory removed)
+  // Only sampler, tester, optimiser on Gantt
   const tools = ["sampler", "tester", "optimiser"];
 
   return (
@@ -44,40 +44,41 @@ export function ResourceSchedule() {
 
       {/* Header */}
       <div className="flex items-center justify-between">
-        <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+        <div className="text-xs font-semibold text-slate-700 dark:text-slate-400 uppercase tracking-wider">
           Lab Resources
         </div>
-        <div className="text-xs text-slate-500">Day {day}</div>
+        <div className="text-xs text-slate-500 dark:text-slate-500">
+          Day {day}
+        </div>
       </div>
 
-      {/* Current time */}
+      {/* Current time + Next Day button */}
       <div className="flex items-center justify-between">
-        <div className="text-2xl font-mono font-bold text-slate-100">
+        <div className="text-2xl font-mono font-bold text-slate-800 dark:text-slate-100">
           {formatVirtualTime(mins)}
         </div>
-        {/* Next Day button — moved here from TopBar */}
         <button
           onClick={nextDay}
           disabled={bgActive || isLoading}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:border-blue-500 hover:text-blue-400 text-xs font-medium transition-colors disabled:opacity-40"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-blue-400 dark:hover:border-blue-500 hover:text-blue-600 dark:hover:text-blue-400 text-xs font-medium transition-colors disabled:opacity-40"
         >
           Next Day →
         </button>
       </div>
 
-      {/* Gantt rows — memory removed */}
+      {/* Gantt rows */}
       <div className="space-y-1.5">
         {tools.map((tool) => {
           const entries = todayLog.filter((e) => e.tool === tool);
           return (
             <div key={tool} className="flex items-center gap-2">
-              <div className="text-[10px] text-slate-500 w-16 shrink-0 text-right">
+              <div className="text-[10px] text-slate-500 dark:text-slate-500 w-16 shrink-0 text-right">
                 {TOOL_LABELS[tool]}
               </div>
-              <div className="flex-1 h-3 bg-slate-800 rounded-full overflow-hidden relative">
+              <div className="flex-1 h-3 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden relative">
                 {/* Current time cursor */}
                 <div
-                  className="absolute top-0 bottom-0 w-px bg-slate-500 z-10"
+                  className="absolute top-0 bottom-0 w-px bg-slate-400 dark:bg-slate-500 z-10"
                   style={{ left: `${pct}%` }}
                 />
                 {/* Usage blocks */}
@@ -102,9 +103,9 @@ export function ResourceSchedule() {
       </div>
 
       {/* Footer */}
-      <div className="flex justify-between text-[10px] text-slate-600">
+      <div className="flex justify-between text-[10px] text-slate-400 dark:text-slate-600">
         <span>09:00</span>
-        <span className={remaining < 60 ? "text-red-400" : "text-slate-500"}>
+        <span className={remaining < 60 ? "text-red-500 dark:text-red-400" : "text-slate-500 dark:text-slate-500"}>
           {remaining}m remaining
         </span>
         <span>17:00</span>

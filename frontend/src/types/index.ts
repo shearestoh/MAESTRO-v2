@@ -52,34 +52,85 @@ export interface CampaignSpec {
   status:               string;
 }
 
+// ── Sample Registry ───────────────────────────────────────────────────────────
+
+export interface SampleResult {
+  result_id:  string;
+  tested_by:  string;
+  conditions: Record<string, number>;
+  outputs:    Record<string, number>;
+  tested_at:  string;
+  tested_day: number;
+  notes:      string;
+}
+
+export interface Sample {
+  sample_id:      string;
+  params:         Record<string, number>;
+  prepared_by:    string;
+  status:         "prepared" | "tested" | "failed" | "stored";
+  prepared_at:    string;
+  prepared_day:   number;
+  failure_reason: string | null;
+  notes:          string;
+  results:        SampleResult[];
+  tags:           string[];
+}
+
+// ── Workflow Plan ─────────────────────────────────────────────────────────────
+
+export interface WorkflowStep {
+  step_id:          string;
+  kind:             "prepare_sample" | "test_sample" | "optimise_condition" | "list_samples" | "query_database" | "plotter" | "narration";
+  label:            string;
+  instrument?:      string;
+  // prepare_sample
+  params?:          Record<string, number>;
+  produces?:        string;
+  // test_sample
+  sample_ref?:      string;
+  conditions?:      Record<string, number>;
+  measures?:        string;
+  // optimise_condition
+  condition_label?: string;
+  condition_value?: number;
+  condition_unit?:  string;
+  free_params?:     Array<{name: string; min: number; max: number; unit: string}>;
+  objective_metric?: string;
+  n_calls?:         number;
+  n_initial_points?: number;
+  // query_database
+  sql?:             string;
+  description?:     string;
+  // editable fields
+  editable_fields?: string[];
+}
+
+export interface WorkflowPlan {
+  plan_id:    string;
+  summary:    string;
+  steps:      WorkflowStep[];
+  source:     "agent" | "paper" | "user";
+  created_at: string;
+}
+
+// ── Results ───────────────────────────────────────────────────────────────────
+
 export interface ResultEntry {
-  // ── Phase 3: general condition fields ──────────────────────────────────────
-  condition_label: string;    // e.g. "power_W", "temperature_C", "ph"
-  condition_value: number;    // the fixed value for this run
-
-  // ── Backward compat ────────────────────────────────────────────────────────
-  power_W: number;            // mirrors condition_value
-
-  // ── BO results ─────────────────────────────────────────────────────────────
-  X:  [number, number][];
-  y:  number[];
-
-  // ── Best observed ──────────────────────────────────────────────────────────
-  best_params:    Record<string, number>;  // general: {param_name: value}
-  best_objective: number | null;           // general field
-  best_energy:    number | null;           // backward compat alias
-
-  // ── Legacy battery-specific best fields ────────────────────────────────────
-  best_am:  number | null;
-  best_por: number | null;
-
-  // ── Diagnostics ────────────────────────────────────────────────────────────
-  failed_samples:     number;
-  attempts:           number;
+  condition_label: string;
+  condition_value: number;
+  power_W:         number;
+  X:               [number, number][];
+  y:               number[];
+  best_params:     Record<string, number>;
+  best_objective:  number | null;
+  best_energy:     number | null;
+  best_am:         number | null;
+  best_por:        number | null;
+  failed_samples:  number;
+  attempts:        number;
   termination_reason: string | null;
-
-  // ── Param names used in this run ───────────────────────────────────────────
-  param_names: string[];
+  param_names:     string[];
 }
 
 export interface OutstandingTask {
@@ -87,8 +138,8 @@ export interface OutstandingTask {
   condition_label:   string;
   condition_value:   number;
   remaining_n_calls: number;
+  completed_calls?:  number;
   free_params:       Array<{name: string; min: number; max: number; unit: string}>;
-  // backward compat
   power_W?:          number;
 }
 
@@ -146,8 +197,10 @@ export interface SessionState {
   timeline:                   TimelineItem[];
   metric_labels:              MetricLabels;
   resource_log:               ResourceLogEntry[];
-  // Phase 3
   active_condition_key:       string;
+  // Phase 3
+  sample_registry:            Sample[];
+  pending_plan:               WorkflowPlan | null;
 }
 
 // ── WebSocket Events ──────────────────────────────────────────────────────────
@@ -179,21 +232,21 @@ export interface EquipmentNodeData {
   [key: string]: unknown;
 }
 
-// ── Tool Registry ─────────────────────────────────────────────────────────────
+// ── Instrument Registry ───────────────────────────────────────────────────────
 
-export interface VirtualTool {
+export interface VirtualInstrument {
   tool_id:       string;
   name:          string;
   kind:          string;
   description:   string;
-  parameters:    ToolParameter[];
-  outputs:       ToolOutput[];
-  failure_modes: ToolFailureMode[];
+  parameters:    InstrumentParameter[];
+  outputs:       InstrumentOutput[];
+  failure_modes: InstrumentFailureMode[];
   time_cost_min: number;
   enabled:       boolean;
 }
 
-export interface ToolParameter {
+export interface InstrumentParameter {
   name:        string;
   type:        string;
   min?:        number;
@@ -203,15 +256,18 @@ export interface ToolParameter {
   required:    boolean;
 }
 
-export interface ToolOutput {
+export interface InstrumentOutput {
   name:        string;
   type:        string;
   unit:        string;
   description: string;
 }
 
-export interface ToolFailureMode {
+export interface InstrumentFailureMode {
   name:        string;
   description: string;
   probability: number;
 }
+
+// Backward compat alias
+export type VirtualTool = VirtualInstrument;

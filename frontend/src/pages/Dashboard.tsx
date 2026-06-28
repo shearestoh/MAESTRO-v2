@@ -69,8 +69,8 @@ export function Dashboard() {
 
         {/* Chat — renamed, no sub-description */}
         <div className="glass-panel flex flex-col overflow-hidden">
-          <div className="px-4 py-2.5 border-b border-slate-700 shrink-0">
-            <h2 className="text-sm font-semibold text-slate-200">
+          <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-700 shrink-0">
+            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
               Chat with MAESTRO
             </h2>
           </div>
@@ -82,8 +82,8 @@ export function Dashboard() {
         {/* Digital Lab — renamed, no sub-description */}
         <div className="flex flex-col gap-3 min-h-0">
           <div className="glass-panel flex flex-col flex-1 overflow-hidden">
-            <div className="px-4 py-2.5 border-b border-slate-700 shrink-0">
-              <h2 className="text-sm font-semibold text-slate-200">
+            <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-700 shrink-0">
+              <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
                 Digital Lab
               </h2>
             </div>
@@ -111,19 +111,19 @@ function CampaignTimeline() {
   const items = useMaestroStore((s) => s.state?.timeline ?? []);
 
   const styles = {
-    done:    "text-green-400",
-    active:  "text-blue-400",
-    pending: "text-slate-500",
+    done:    "text-green-600 dark:text-green-400",
+    active:  "text-blue-600 dark:text-blue-400",
+    pending: "text-slate-400 dark:text-slate-500",
   };
   const icons = { done: "●", active: "◉", pending: "○" };
 
   return (
     <div className="glass-panel p-4 space-y-2 flex-1">
-      <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-        Campaign Progress
+      <div className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wider">
+        Workflow Status
       </div>
       {items.length === 0 && (
-        <div className="text-xs text-slate-600 italic">
+        <div className="text-xs text-slate-400 dark:text-slate-600 italic">
           No active campaign.
         </div>
       )}

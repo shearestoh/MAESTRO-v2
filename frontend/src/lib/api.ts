@@ -1,4 +1,4 @@
-import type { SessionState, VirtualTool } from "@/types";
+import type { SessionState, VirtualInstrument, WorkflowPlan } from "@/types";
 
 const BASE = "/api";
 
@@ -46,6 +46,13 @@ export const api = {
       body:   JSON.stringify({ session_id: sessionId }),
     }),
 
+  // ── Phase 3: Execute plan ──────────────────────────────────────────────────
+  executePlan: (sessionId: string, plan: WorkflowPlan) =>
+    request<{ state: SessionState }>("/execute-plan", {
+      method: "POST",
+      body:   JSON.stringify({ session_id: sessionId, plan }),
+    }),
+
   // ── Documents ──────────────────────────────────────────────────────────────
   uploadDocument: async (sessionId: string, file: File) => {
     const form = new FormData();
@@ -84,18 +91,18 @@ export const api = {
     return res.json();
   },
 
-  // ── Tool registry ──────────────────────────────────────────────────────────
+  // ── Instrument registry ────────────────────────────────────────────────────
   listTools: () =>
-    request<{ status: string; tools: VirtualTool[] }>("/tools"),
+    request<{ status: string; tools: VirtualInstrument[] }>("/tools"),
 
-  registerTool: (toolData: Partial<VirtualTool>) =>
-    request<{ status: string; tool: VirtualTool }>("/tools", {
+  registerTool: (toolData: Partial<VirtualInstrument>) =>
+    request<{ status: string; tool: VirtualInstrument }>("/tools", {
       method: "POST",
       body:   JSON.stringify(toolData),
     }),
 
-  updateTool: (toolId: string, updates: Partial<VirtualTool>) =>
-    request<{ status: string; tool: VirtualTool }>(`/tools/${toolId}`, {
+  updateTool: (toolId: string, updates: Partial<VirtualInstrument>) =>
+    request<{ status: string; tool: VirtualInstrument }>(`/tools/${toolId}`, {
       method: "PUT",
       body:   JSON.stringify(updates),
     }),
@@ -103,19 +110,14 @@ export const api = {
   deleteTool: (toolId: string) =>
     request<{ status: string }>(`/tools/${toolId}`, { method: "DELETE" }),
 
-  // ── Exports ────────────────────────────────────────────────────────────────
-  exportResultsCsv:  (sessionId: string) =>
-    fetch(`${BASE}/export/results-csv/${sessionId}`,   { method: "POST" }),
-
-  exportResultsJson: (sessionId: string) =>
-    fetch(`${BASE}/export/results-json/${sessionId}`,  { method: "POST" }),
-
-  exportCampaignJson:(sessionId: string) =>
-    fetch(`${BASE}/export/campaign-json/${sessionId}`, { method: "POST" }),
-
   // ── Plot ───────────────────────────────────────────────────────────────────
-  getPlotUrl: (sessionId: string) =>
-    `${BASE}/plot/${sessionId}`,
-};
+  getPlotUrl: (sessionId: string) => `${BASE}/plot/${sessionId}`,
 
-  
+  // ── Exports ────────────────────────────────────────────────────────────────
+  exportResultsCsv:   (sessionId: string) =>
+    fetch(`${BASE}/export/results-csv/${sessionId}`,   { method: "POST" }),
+  exportResultsJson:  (sessionId: string) =>
+    fetch(`${BASE}/export/results-json/${sessionId}`,  { method: "POST" }),
+  exportCampaignJson: (sessionId: string) =>
+    fetch(`${BASE}/export/campaign-json/${sessionId}`, { method: "POST" }),
+};

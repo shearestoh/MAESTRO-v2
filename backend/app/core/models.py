@@ -2,22 +2,21 @@
 Pydantic data models — single source of truth for all data shapes.
 
 Phase 2 additions: FigureModel, TableModel, SectionModel on DocumentModel.
-Phase 3 additions: ResultEntry generalised for domain-agnostic campaigns.
-  - condition_label / condition_value replace power_W as primary keys
-  - power_W kept for backward compatibility with existing sessions
-  - best_objective added alongside best_energy
-  - SessionModel.active_condition_key tracks which condition dimension
-    is being varied in the current campaign
+Phase 3 additions:
+  - SampleResult, Sample: domain-agnostic sample registry
+  - WorkflowStep, WorkflowPlan: structured plan for human-in-the-loop
+  - ResultEntry generalised for domain-agnostic campaigns
+  - SessionModel gains sample_registry + pending_plan
 """
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
+import uuid
 
 
 # ── Document structure (MinerU-enriched) ─────────────────────────────────────
 
 class FigureModel(BaseModel):
-    """An extracted figure from a paper."""
     figure_id:  str
     page_idx:   int = 0
     caption:    str = ""
@@ -27,7 +26,6 @@ class FigureModel(BaseModel):
 
 
 class TableModel(BaseModel):
-    """An extracted table from a paper."""
     table_id:  str
     page_idx:  int = 0
     caption:   str = ""
@@ -36,7 +34,6 @@ class TableModel(BaseModel):
 
 
 class SectionModel(BaseModel):
-    """A structured section from a paper (MinerU heading hierarchy)."""
     heading:    str
     level:      int = 2
     content:    str = ""
@@ -45,7 +42,6 @@ class SectionModel(BaseModel):
 
 
 class DocumentModel(BaseModel):
-    """A PDF paper that has been uploaded and parsed."""
     document_id:  str
     filename:     str
     title:        Optional[str] = None
@@ -53,10 +49,147 @@ class DocumentModel(BaseModel):
     pages:        List[str] = Field(default_factory=list)
     uploaded_at:  Optional[str] = None
     summary:      Optional[str] = None
-    sections:     List[SectionModel]  = Field(default_factory=list)
-    figures:      List[FigureModel]   = Field(default_factory=list)
-    tables:       List[TableModel]    = Field(default_factory=list)
+    sections:     List[SectionModel] = Field(default_factory=list)
+    figures:      List[FigureModel]  = Field(default_factory=list)
+    tables:       List[TableModel]   = Field(default_factory=list)
     mineru_used:  bool = False
+
+
+# ── Sample Registry ───────────────────────────────────────────────────────────
+
+class SampleResult(BaseModel):
+    """
+    A single test result on a sample.
+
+    Domain-agnostic: conditions and outputs are arbitrary dicts.
+    Works for any instrument combination:
+      - Battery: conditions={"power_W": 100}, outputs={"specific_energy": 87.3}
+      - Catalysis: conditions={"temperature_C": 300}, outputs={"CO2_conversion": 0.82}
+      - Drug: conditions={"ph": 7}, outputs={"dissolution_rate": 0.45}
+    """
+    result_id:  str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    tested_by:  str                      # instrument name e.g. "TesterAgent"
+    conditions: Dict[str, float]         # fixed conditions during test
+    outputs:    Dict[str, float]         # measured outputs
+    tested_at:  str                      # virtual timestamp e.g. "09:14"
+    tested_day: int = 1
+    notes:      str = ""
+
+
+class Sample(BaseModel):
+    """
+    A domain-agnostic physical or virtual sample.
+
+    Not specific to batteries — could be:
+    - A battery electrode  (active_material, porosity)
+    - A catalyst pellet    (loading, particle_size)
+    - A polymer film       (thickness, composition)
+    - A drug formulation   (excipient_ratio, particle_size)
+    - A solar cell layer   (thickness, dopant_pct)
+
+    The 'params' dict holds whatever parameters were used
+    to prepare it — no hardcoded field names.
+
+    The 'prepared_by' field references the instrument by name,
+    so any instrument can prepare samples in future.
+    """
+    sample_id:      str                       # e.g. "S-1-001"
+    params:         Dict[str, float]          # preparation parameters
+    prepared_by:    str                       # instrument name
+    status:         str = "prepared"          # prepared | tested | failed | stored
+    prepared_at:    str = ""                  # virtual timestamp
+    prepared_day:   int = 1
+    failure_reason: Optional[str] = None
+    notes:          str = ""
+    results:        List[SampleResult] = Field(default_factory=list)
+    tags:           List[str] = Field(default_factory=list)
+
+    def best_output(self, output_name: str) -> Optional[float]:
+        """Return the best value of a given output across all test results."""
+        values = [
+            r.outputs[output_name]
+            for r in self.results
+            if output_name in r.outputs
+        ]
+        return max(values) if values else None
+
+    def latest_result(self) -> Optional[SampleResult]:
+        """Return the most recent test result."""
+        return self.results[-1] if self.results else None
+
+
+def generate_sample_id(session: "SessionModel") -> str:
+    """
+    Generate a sequential, human-readable sample ID.
+    Format: S-{day}-{count:03d}
+    e.g. S-1-001, S-1-002, S-2-001
+
+    Domain-agnostic — works for any sample type.
+    In future could be prefixed by instrument type:
+    e.g. E-1-001 (electrode), C-1-001 (catalyst)
+    """
+    day   = session.virtual_day_index
+    count = len(session.sample_registry) + 1
+    return f"S-{day}-{count:03d}"
+
+
+# ── Workflow Plan (Human-in-the-loop) ─────────────────────────────────────────
+
+class WorkflowStep(BaseModel):
+    """
+    A single step in a proposed workflow plan.
+
+    Domain-agnostic: kind determines what execute_plan_step() does.
+    The frontend renders this as an editable card.
+
+    DAG support: sample_ref allows steps to reference outputs
+    of previous steps using {{variable_name}} syntax.
+    e.g. step 2 can reference step 1's sample_id via "{{sample_id}}"
+    """
+    step_id:    str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    kind:       str                           # optimise_condition | prepare_sample | test_sample | plotter | query_database
+    label:      str                           # human-readable description
+    instrument: Optional[str] = None         # which instrument runs this step
+
+    # For prepare_sample steps
+    params:     Dict[str, float] = Field(default_factory=dict)
+    produces:   Optional[str] = None         # variable name for output e.g. "sample_id"
+
+    # For test_sample steps
+    sample_ref: Optional[str] = None         # e.g. "{{sample_id}}" or literal "S-1-001"
+    conditions: Dict[str, float] = Field(default_factory=dict)
+    measures:   Optional[str] = None         # output metric name
+
+    # For optimise_condition steps
+    condition_label:  Optional[str] = None
+    condition_value:  Optional[float] = None
+    condition_unit:   str = ""
+    free_params:      List[dict] = Field(default_factory=list)
+    objective_metric: Optional[str] = None
+    n_calls:          int = 20
+    n_initial_points: int = 6
+
+    # For query_database steps
+    sql:         Optional[str] = None
+    description: Optional[str] = None
+
+    # Editable by user in WorkflowPlanEditor
+    editable_fields: List[str] = Field(default_factory=list)
+
+
+class WorkflowPlan(BaseModel):
+    """
+    A complete proposed workflow plan.
+
+    Created by the LLM via plan_workflow tool call.
+    Displayed in WorkflowPlanEditor for human review + modification.
+    Sent to POST /execute-plan after approval.
+    """
+    plan_id:   str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    summary:   str                           # human-readable one-liner
+    steps:     List[WorkflowStep]
+    source:    str = "agent"                 # "agent" | "paper" | "user"
+    created_at: str = ""
 
 
 # ── Agent internals ───────────────────────────────────────────────────────────
@@ -75,7 +208,6 @@ class AgentStateModel(BaseModel):
 # ── Equipment ─────────────────────────────────────────────────────────────────
 
 class EquipmentStatusModel(BaseModel):
-    """Which lab equipment is currently active — drives digital twin."""
     llm:       bool = False
     optimiser: bool = False
     sampler:   bool = False
@@ -88,109 +220,40 @@ class EquipmentStatusModel(BaseModel):
 # ── Results ───────────────────────────────────────────────────────────────────
 
 class ResultEntry(BaseModel):
-    """
-    One result entry per operating condition value.
-
-    Phase 3: generalised to support any domain.
-
-    condition_label: human-readable condition name
-                     e.g. "power_W", "temperature_C", "ph"
-    condition_value: the fixed value for this run
-                     e.g. 150.0, 300.0, 7.0
-
-    power_W is kept for backward compatibility — it mirrors
-    condition_value when condition_label == "power_W".
-
-    best_objective is the general field; best_energy mirrors it
-    for backward compatibility.
-    """
-    # ── General condition fields (Phase 3) ────────────────────────────────────
-    condition_label: str   = "power_W"   # which condition dimension
-    condition_value: float = 0.0         # the fixed value for this run
-
-    # ── Backward-compatible field ─────────────────────────────────────────────
-    power_W: float = 0.0                 # mirrors condition_value
-
-    # ── BO results ────────────────────────────────────────────────────────────
-    X:  List[List[float]] = Field(default_factory=list)  # parameter vectors
-    y:  List[float]       = Field(default_factory=list)  # objective values
-
-    # ── Best observed ─────────────────────────────────────────────────────────
+    condition_label: str   = "power_W"
+    condition_value: float = 0.0
+    power_W:         float = 0.0
+    X:  List[List[float]] = Field(default_factory=list)
+    y:  List[float]       = Field(default_factory=list)
     best_params:     Dict[str, float] = Field(default_factory=dict)
-    best_objective:  Optional[float]  = None   # general field (Phase 3)
-    best_energy:     Optional[float]  = None   # backward compat alias
-
-    # ── Legacy per-param best fields (battery-specific, kept for compat) ──────
+    best_objective:  Optional[float]  = None
+    best_energy:     Optional[float]  = None
     best_am:         Optional[float]  = None
     best_por:        Optional[float]  = None
-
-    # ── Diagnostics ───────────────────────────────────────────────────────────
     failed_samples:     int = 0
     attempts:           int = 0
     termination_reason: Optional[str] = None
-
-    # ── Param names used in this run (for display) ────────────────────────────
     param_names: List[str] = Field(default_factory=list)
-
-    def sync_compat_fields(self) -> "ResultEntry":
-        """
-        Keep backward-compatible fields in sync with general fields.
-        Call after updating condition_value or best_objective.
-        """
-        # power_W mirrors condition_value
-        self.power_W = self.condition_value
-
-        # best_energy mirrors best_objective
-        if self.best_objective is not None:
-            self.best_energy = self.best_objective
-        elif self.best_energy is not None:
-            self.best_objective = self.best_energy
-
-        # best_am / best_por: mirror from best_params if available
-        if "active_material" in self.best_params:
-            self.best_am = self.best_params["active_material"]
-        if "porosity" in self.best_params:
-            self.best_por = self.best_params["porosity"]
-
-        return self
 
 
 def make_result_entry(
     condition_label: str,
     condition_value: float,
 ) -> dict:
-    """
-    Factory: create a new result entry dict for the results_store.
-
-    Using a plain dict (not ResultEntry instance) to match the existing
-    results_store pattern — avoids breaking the many places that do
-    r["X"], r["y"], r["best_energy"] etc.
-    """
     return {
-        # General fields (Phase 3)
         "condition_label": condition_label,
         "condition_value": condition_value,
         "param_names":     [],
-
-        # Backward compat
         "power_W":         condition_value,
-
-        # BO results
         "X":               [],
         "y":               [],
-
-        # Best observed
         "best_params":     {},
         "best_objective":  None,
-        "best_energy":     None,   # backward compat
-
-        # Legacy battery-specific best fields
+        "best_energy":     None,
         "best_am":         None,
         "best_por":        None,
-
-        # Diagnostics
-        "failed_samples":     0,
-        "attempts":           0,
+        "failed_samples":  0,
+        "attempts":        0,
         "termination_reason": None,
     }
 
@@ -222,10 +285,6 @@ class CaseStudyExtraction(BaseModel):
 # ── Events ────────────────────────────────────────────────────────────────────
 
 class ExecutionEvent(BaseModel):
-    """
-    A single live event emitted during workflow execution.
-    Pushed to the frontend via WebSocket.
-    """
     event_type: str
     message:    str
     equipment:  Optional[str] = None
@@ -263,10 +322,14 @@ class SessionModel(BaseModel):
     active_document_id: Optional[str] = None
     extracted_campaign: Optional[CampaignSpec] = None
 
-    # Phase 3: which condition dimension is active in current campaign
-    # e.g. "power_W", "temperature_C", "ph"
-    # Derived from extracted_campaign.operating_conditions[0].name
+    # Phase 3: active condition key
     active_condition_key: str = "power_W"
+
+    # Phase 3: sample registry
+    sample_registry: List[Sample] = Field(default_factory=list)
+
+    # Phase 3: pending workflow plan (shown in WorkflowPlanEditor)
+    pending_plan: Optional[WorkflowPlan] = None
 
     # UI state
     equipment_status: EquipmentStatusModel = Field(
@@ -285,10 +348,10 @@ class SessionModel(BaseModel):
     background_job_status:      str = "idle"
     background_job_id:          Optional[str] = None
 
-    # Live event queue (drained by WebSocket endpoint)
+    # Live event queue
     live_event_queue: List[ExecutionEvent] = Field(default_factory=list)
 
-    # Phase 2C: resource schedule log for Gantt display
+    # Phase 2C: resource schedule log
     resource_log: List[dict] = Field(default_factory=list)
 
 
@@ -314,3 +377,11 @@ class ResetRequest(BaseModel):
 class StateResponse(BaseModel):
     session_id: str
     state:      Dict[str, Any]
+
+class ExecutePlanRequest(BaseModel):
+    """
+    Sent from frontend after user approves (and optionally edits)
+    a WorkflowPlan in the WorkflowPlanEditor.
+    """
+    session_id: str
+    plan:       Dict[str, Any]   # serialised WorkflowPlan

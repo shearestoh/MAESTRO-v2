@@ -31,13 +31,16 @@ from app.core.models import (
 from app.core.orchestrator import (
     confirm_pending,
     create_session,
+    execute_plan, 
     get_session,
     next_day,
     post_user_message,
     register_artifact,
     reset_session,
+    resume_outstanding_tasks, 
     session_state_payload,
 )
+from app.core.models import ExecutePlanRequest
 from app.core.skills import describe_extracted_campaign, summarise_uploaded_document
 from app.core.tool_registry import TOOL_REGISTRY, VirtualTool
 
@@ -96,6 +99,23 @@ def confirm_route(req: ConfirmRequest):
         )
     except KeyError as e:
         raise HTTPException(404, str(e))
+    
+@router.post("/execute-plan", response_model=StateResponse)
+def execute_plan_route(req: ExecutePlanRequest):
+    """
+    Execute a WorkflowPlan approved (and optionally edited) by the user.
+    Called from WorkflowPlanEditor after user clicks Approve & Run.
+    """
+    try:
+        session = execute_plan(req.session_id, req.plan)
+        return StateResponse(
+            session_id=req.session_id,
+            state=session_state_payload(session),
+        )
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"{type(e).__name__}: {e}")    
 
 
 @router.post("/next-day", response_model=StateResponse)
@@ -109,6 +129,24 @@ def next_day_route(req: NextDayRequest):
     except KeyError as e:
         raise HTTPException(404, str(e))
 
+@router.post("/resume-outstanding", response_model=StateResponse)
+def resume_outstanding_route(req: NextDayRequest):
+    """
+    Advance to next day and resume all outstanding tasks.
+    Called automatically when agent calls resume_outstanding_tasks tool.
+    Note: NextDayRequest reused — only needs session_id.
+    """
+    try:
+        session = resume_outstanding_tasks(req.session_id)
+        return StateResponse(
+            session_id=req.session_id,
+            state=session_state_payload(session),
+        )
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"{type(e).__name__}: {e}")    
+
 
 @router.post("/reset", response_model=StateResponse)
 def reset_route(req: ResetRequest):
@@ -120,6 +158,7 @@ def reset_route(req: ResetRequest):
         )
     except KeyError as e:
         raise HTTPException(404, str(e))
+   
 
 
 # ── Documents ─────────────────────────────────────────────────────────────────
