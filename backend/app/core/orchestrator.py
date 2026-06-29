@@ -207,7 +207,13 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
             tc["function"]["name"]
             for tc in session.agent_state.pending_tool_calls
         ]
-        single_instrument_actions = {"prepare_sample", "test_sample", "list_samples"}
+        single_instrument_actions = {
+            "prepare_sample",
+            "test_sample",
+            "list_samples",
+            "plotter",
+            "query_database",
+        }
         all_single = all(n in single_instrument_actions for n in pending_names)
 
         if all_single:
@@ -271,6 +277,34 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
                             "role": "assistant",
                             "content": f"Error listing samples: `{e}`",
                         })            
+                elif name == "plotter":
+                    step = {"kind": "plotter"}
+                    try:
+                        execute_plan_step(session, step, query_database, dag_context)
+                    except Exception as e:
+                        session.agent_state.messages.append({
+                            "role": "assistant",
+                            "content": f"Error generating plot: `{e}`",
+                        })
+
+                elif name == "query_database":
+                    args_parsed = {}
+                    try:
+                        args_parsed = json.loads(tc["function"]["arguments"] or "{}")
+                    except Exception:
+                        pass
+                    step = {
+                        "kind":        "query_database",
+                        "sql":         args_parsed.get("sql", ""),
+                        "description": args_parsed.get("description", ""),
+                    }
+                    try:
+                        execute_plan_step(session, step, query_database, dag_context)
+                    except Exception as e:
+                        session.agent_state.messages.append({
+                            "role": "assistant",
+                            "content": f"Error querying database: `{e}`",
+                        })
 
     # Auto-handle resume_outstanding_tasks
     if session.agent_state.awaiting_confirmation:
@@ -793,13 +827,16 @@ def register_artifact(
 def session_state_payload(session: SessionModel) -> dict:
     results    = session.agent_state.results_store
     obj_label  = "Objective"
-    cond_label = session.active_condition_key or "Condition"
+    cond_label = "Conditions"
 
     if session.extracted_campaign:
-        obj_label  = session.extracted_campaign.objective_metric or "Objective"
+        obj_label = (
+            session.extracted_campaign.objective_metric or "Objective"
+        )
+        # Once a campaign is extracted, use the actual condition name
         ocs = session.extracted_campaign.operating_conditions
         if ocs:
-            cond_label = ocs[0].get("name", cond_label)
+            cond_label = ocs[0].get("name", "Conditions")
 
     return {
         "session_id":                 session.session_id,
@@ -841,7 +878,7 @@ def session_state_payload(session: SessionModel) -> dict:
         "metric_labels": {
             "experiments": "Experiments",
             "best_result": f"Best {obj_label}",
-            "conditions":  f"{cond_label} Runs",
+            "conditions":  f"Operating {cond_label}" if cond_label != "Conditions" else "Operating Conditions",
             "failures":    "Failed Steps",
         },
         "resource_log": session.resource_log[-100:],

@@ -323,7 +323,7 @@ class SessionModel(BaseModel):
     extracted_campaign: Optional[CampaignSpec] = None
 
     # Phase 3: active condition key
-    active_condition_key: str = "power_W"
+    active_condition_key: str = ""
 
     # Phase 3: sample registry
     sample_registry: List[Sample] = Field(default_factory=list)
