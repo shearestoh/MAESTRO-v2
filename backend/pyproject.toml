@@ -1,45 +1,28 @@
 [project]
-name = "maestro-v3-backend"
-version = "0.2.0"
-description = "MAESTRO v3 — Domain-Agnostic Agentic Scientific Orchestration"
+name = "maestro-backend"
+version = "1.0.0"
+description = "MAESTRO — Agentic Self-Driving Laboratory Platform"
 readme = "README.md"
 requires-python = ">=3.12"
 
 dependencies = [
-    # Web framework
     "fastapi[standard]>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "python-multipart>=0.0.9",
-
-    # Data validation
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
-
-    # LLM
     "openai>=1.40.0",
-
-    # Optimisation
     "scikit-optimize>=0.10.2",
     "numpy>=1.26.0",
     "scipy>=1.13.0",
-
-    # Plotting
     "matplotlib>=3.9.0",
-
-    # PDF parsing — PyPDF2 always available as fallback
     "pypdf2>=3.0.0",
-
-    # Environment
     "python-dotenv>=1.0.0",
-
-    # HTTP client
     "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]
-mineru = [
-    "mineru>=3.4.0",
-]
+mineru = ["mineru>=3.4.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from "react";
+import { useMemo, useCallback, useEffect } from "react";
 import {
   ReactFlow, Background, Controls, MiniMap,
   BackgroundVariant, useNodesState, useEdgesState,
@@ -12,14 +12,17 @@ import type { EquipmentNodeData, EquipmentStatus } from "@/types";
 const nodeTypes = { equipment: EquipmentNode };
 
 function makeNodes(eq: EquipmentStatus): Node[] {
-  const defs: Array<{ id: string; label: string; type: keyof EquipmentStatus | "llm"; x: number; y: number; desc: string; extra?: Partial<EquipmentNodeData> }> = [
-    { id: "maestro",   label: "MAESTRO",   type: "llm",       x: 300, y: 200, desc: "LLM Orchestrator"       },
-    { id: "knowledge", label: "Knowledge", type: "knowledge", x:  60, y:  50, desc: "RAG + Document Store"   },
-    { id: "optimiser", label: "Optimiser", type: "optimiser", x: 540, y:  50, desc: "Bayesian / LLM-BO"      },
-    { id: "sampler",   label: "Sampler",   type: "sampler",   x:  60, y: 360, desc: "Electrode Preparation", extra: { failProb: 0.06, timeCost: 2 } },
-    { id: "tester",    label: "Tester",    type: "tester",    x: 540, y: 360, desc: "Discharge Testing",     extra: { noiseSigma: 0.5, timeCost: 5 } },
-    { id: "memory",    label: "Memory",    type: "memory",    x: 300, y: 420, desc: "Experiment Store"       },
-    { id: "reporting", label: "Reporting", type: "reporting", x: 300, y:  10, desc: "Figure Generation"      },
+  const defs: Array<{
+    id: string; label: string; type: keyof EquipmentStatus | "llm";
+    x: number; y: number; desc: string; extra?: Partial<EquipmentNodeData>;
+  }> = [
+    { id: "maestro",   label: "MAESTRO",   type: "llm",       x: 300, y: 200, desc: "LLM Orchestrator"     },
+    { id: "knowledge", label: "Knowledge", type: "knowledge", x:  60, y:  50, desc: "RAG + Document Store"  },
+    { id: "optimiser", label: "Optimiser", type: "optimiser", x: 540, y:  50, desc: "Bayesian / LLM-BO"    },
+    { id: "sampler",   label: "Sampler",   type: "sampler",   x:  60, y: 360, desc: "Sample Preparation",   extra: { failProb: 0.06, timeCost: 2 } },
+    { id: "tester",    label: "Tester",    type: "tester",    x: 540, y: 360, desc: "Characterisation",     extra: { noiseSigma: 0.5, timeCost: 5 } },
+    { id: "memory",    label: "Memory",    type: "memory",    x: 300, y: 420, desc: "Experiment Store"      },
+    { id: "reporting", label: "Reporting", type: "reporting", x: 300, y:  10, desc: "Figure Generation"     },
   ];
 
   return defs.map(({ id, label, type, x, y, desc, extra }) => {
@@ -61,8 +64,7 @@ function LabCanvasInner() {
   const [nodes, setNodes, onNodesChange] = useNodesState(makeNodes(eq));
   const [edges, setEdges, onEdgesChange] = useEdgesState(INITIAL_EDGES);
 
-  // Sync active states whenever equipment_status changes
-  useMemo(() => {
+  useEffect(() => {
     setNodes(makeNodes(eq));
     setEdges((eds) =>
       eds.map((e) => {
@@ -72,7 +74,7 @@ function LabCanvasInner() {
         const pipelineActive   =
           (eq[e.source as keyof EquipmentStatus] ?? false) ||
           (eq[e.target as keyof EquipmentStatus] ?? false);
-        const animated         = isMaestroEdge ? nonMaestroActive : pipelineActive;
+        const animated = isMaestroEdge ? nonMaestroActive : pipelineActive;
         return {
           ...e,
           animated,
@@ -80,7 +82,6 @@ function LabCanvasInner() {
         };
       })
     );
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eq.llm, eq.optimiser, eq.sampler, eq.tester, eq.memory, eq.knowledge, eq.reporting]);
 
   const onConnect = useCallback(
@@ -89,7 +90,7 @@ function LabCanvasInner() {
   );
 
   return (
-    <div className="w-full h-full rounded-xl overflow-hidden border border-slate-700">
+    <div className="w-full h-full rounded-xl overflow-hidden border border-slate-200">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -99,15 +100,15 @@ function LabCanvasInner() {
         nodeTypes={nodeTypes}
         fitView
         fitViewOptions={{ padding: 0.2 }}
-        colorMode="dark"
+        colorMode="light"
         proOptions={{ hideAttribution: true }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#1e293b" />
+        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#e2e8f0" />
         <Controls showInteractive={false} />
         <MiniMap
-          nodeColor={(n) => ((n.data as EquipmentNodeData).active ? "#3b82f6" : "#334155")}
-          maskColor="rgba(10,15,30,0.7)"
-          style={{ background: "#1e293b", border: "1px solid #334155" }}
+          nodeColor={(n) => ((n.data as EquipmentNodeData).active ? "#3b82f6" : "#cbd5e1")}
+          maskColor="rgba(248,250,252,0.7)"
+          style={{ background: "#f8fafc", border: "1px solid #e2e8f0" }}
         />
       </ReactFlow>
     </div>

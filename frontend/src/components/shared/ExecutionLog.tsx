@@ -36,11 +36,11 @@ export function ExecutionLog() {
   return (
     <div className="glass-panel p-3 h-full flex flex-col gap-2 overflow-hidden">
       <div className="flex items-center justify-between shrink-0">
-        <div className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wider flex items-center gap-2">
+        <div className="text-sm font-semibold text-slate-600 flex items-center gap-2">
           {bgActive
             ? <span className="status-dot active" />
             : <span className="status-dot idle" />}
-          Execution Log
+          Execution log
         </div>
         {bgActive && (
           <span className="text-[10px] text-blue-600 dark:text-blue-400 font-mono animate-pulse">

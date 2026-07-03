@@ -22,11 +22,11 @@ export interface Artifact {
 }
 
 export interface ParameterSpec {
-  name:           string;
-  original_name?: string;
-  min:            number;
-  max:            number;
-  unit:           string;
+  name:            string;
+  original_name?:  string;
+  min:             number;
+  max:             number;
+  unit:            string;
   mapped_to_tool?: string;
 }
 
@@ -77,32 +77,45 @@ export interface Sample {
   tags:           string[];
 }
 
+export function getBestOutput(sample: Sample, outputName: string): number | null {
+  const values = sample.results
+    .filter((r) => outputName in r.outputs)
+    .map((r) => r.outputs[outputName]);
+  return values.length > 0 ? Math.max(...values) : null;
+}
+
 // ── Workflow Plan ─────────────────────────────────────────────────────────────
+
+export type StepStatus = "pending" | "running" | "completed" | "failed" | "skipped";
 
 export interface WorkflowStep {
   step_id:          string;
-  kind:             "prepare_sample" | "test_sample" | "optimise_condition" | "list_samples" | "query_database" | "plotter" | "narration";
+  kind:             string;
   label:            string;
   instrument?:      string;
-  // prepare_sample
+  instrument_id?:   string;
+  dependencies:     string[];
+  status:           StepStatus;
+  start_time?:      number;
+  end_time?:        number;
+  projected_start_min?: number;
+  projected_end_min?:   number;
   params?:          Record<string, number>;
   produces?:        string;
-  // test_sample
   sample_ref?:      string;
   conditions?:      Record<string, number>;
   measures?:        string;
-  // optimise_condition
   condition_label?: string;
   condition_value?: number;
   condition_unit?:  string;
-  free_params?:     Array<{name: string; min: number; max: number; unit: string}>;
+  free_params?:     Array<{ name: string; min: number; max: number; unit: string }>;
   objective_metric?: string;
   n_calls?:         number;
   n_initial_points?: number;
-  // query_database
+  plot_code?:       string;
+  analysis_code?:   string;
   sql?:             string;
   description?:     string;
-  // editable fields
   editable_fields?: string[];
 }
 
@@ -114,23 +127,34 @@ export interface WorkflowPlan {
   created_at: string;
 }
 
+// ── Projected Schedule ────────────────────────────────────────────────────────
+
+export interface ProjectedScheduleEntry {
+  instrument_id: string;
+  start_min:     number;
+  end_min:       number;
+  step_id:       string;
+  label:         string;
+  is_projected:  boolean;
+}
+
 // ── Results ───────────────────────────────────────────────────────────────────
 
 export interface ResultEntry {
-  condition_label: string;
-  condition_value: number;
-  power_W:         number;
-  X:               [number, number][];
-  y:               number[];
-  best_params:     Record<string, number>;
-  best_objective:  number | null;
-  best_energy:     number | null;
-  best_am:         number | null;
-  best_por:        number | null;
-  failed_samples:  number;
-  attempts:        number;
+  condition_label:    string;
+  condition_value:    number;
+  power_W:            number;
+  X:                  number[][];
+  y:                  number[];
+  best_params:        Record<string, number>;
+  best_objective:     number | null;
+  best_energy:        number | null;
+  best_am:            number | null;
+  best_por:           number | null;
+  failed_samples:     number;
+  attempts:           number;
   termination_reason: string | null;
-  param_names:     string[];
+  param_names:        string[];
 }
 
 export interface OutstandingTask {
@@ -139,7 +163,7 @@ export interface OutstandingTask {
   condition_value:   number;
   remaining_n_calls: number;
   completed_calls?:  number;
-  free_params:       Array<{name: string; min: number; max: number; unit: string}>;
+  free_params:       Array<{ name: string; min: number; max: number; unit: string }>;
   power_W?:          number;
 }
 
@@ -155,18 +179,17 @@ export interface Message {
   tool_calls?: ToolCall[];
 }
 
-export interface ResourceLogEntry {
-  tool:      string;
-  day:       number;
-  start_min: number;
-  end_min:   number;
-}
-
 export interface MetricLabels {
   experiments: string;
   best_result: string;
   conditions:  string;
   failures:    string;
+}
+
+export interface OptimiserConfig {
+  name:             string;
+  n_calls:          number;
+  n_initial_points: number;
 }
 
 export interface SessionState {
@@ -177,8 +200,6 @@ export interface SessionState {
   pending_tool_calls:         ToolCall[];
   last_tool_result:           unknown;
   last_tools_used:            string[];
-  virtual_clock_minutes:      number;
-  virtual_day_index:          number;
   outstanding_tasks:          OutstandingTask[];
   show_plotter_image:         string | null;
   active_document_id:         string | null;
@@ -194,13 +215,22 @@ export interface SessionState {
   background_job_status:      string;
   background_job_index:       number;
   background_job_plan_length: number;
+  background_job_plan:        WorkflowStep[];
+  step_statuses:              Record<string, StepStatus>;
   timeline:                   TimelineItem[];
   metric_labels:              MetricLabels;
   resource_log:               ResourceLogEntry[];
   active_condition_key:       string;
-  // Phase 3
   sample_registry:            Sample[];
   pending_plan:               WorkflowPlan | null;
+  optimiser_config:           OptimiserConfig;
+  projected_schedule:         ProjectedScheduleEntry[];
+}
+
+export interface ResourceLogEntry {
+  instrument: string;
+  start_time: string;
+  end_time:   string;
 }
 
 // ── WebSocket Events ──────────────────────────────────────────────────────────
@@ -235,15 +265,18 @@ export interface EquipmentNodeData {
 // ── Instrument Registry ───────────────────────────────────────────────────────
 
 export interface VirtualInstrument {
-  tool_id:       string;
-  name:          string;
-  kind:          string;
-  description:   string;
-  parameters:    InstrumentParameter[];
-  outputs:       InstrumentOutput[];
-  failure_modes: InstrumentFailureMode[];
-  time_cost_min: number;
-  enabled:       boolean;
+  tool_id:      string;
+  name:         string;
+  kind:         string;
+  category:     "physical" | "computational";
+  sub_category: string;
+  description:  string;
+  parameters:   InstrumentParameter[];
+  outputs:      InstrumentOutput[];
+  failure_modes:InstrumentFailureMode[];
+  time_cost_min:number;
+  enabled:      boolean;
+  is_default:   boolean;
 }
 
 export interface InstrumentParameter {
@@ -269,5 +302,50 @@ export interface InstrumentFailureMode {
   probability: number;
 }
 
-// Backward compat alias
 export type VirtualTool = VirtualInstrument;
+
+// ── Lab Settings ──────────────────────────────────────────────────────────────
+
+export type DocumentType = "paper" | "manual";
+
+export interface DocumentLibraryEntry {
+  document_id: string;
+  filename:    string;
+  title:       string | null;
+  summary:     string | null;
+  uploaded_at: string;
+  mineru_used: boolean;
+  file_path:   string;
+  doc_type:    DocumentType;
+}
+
+export interface OptimisationLibraryEntry {
+  lib_id:       string;
+  name:         string;
+  description:  string;
+  capabilities: string[];
+  install_cmd:  string;
+  docs_url:     string;
+  enabled:      boolean;
+  is_default:   boolean;
+}
+
+export interface LabSettings {
+  lab_name:                string;
+  lab_description:         string;
+  institution:             string;
+  system_prompt_extension: string;
+  lab_start_hour:          number;
+  lab_start_minute:        number;
+  lab_end_hour:            number;
+  lab_end_minute:          number;
+  virtual_min_sampler:     number;
+  virtual_min_tester:      number;
+  sampler_base_fail_prob:  number;
+  tester_noise_sigma:      number;
+  default_n_calls:         number;
+  default_n_initial_points:number;
+  default_optimiser:       string;
+  document_library:        DocumentLibraryEntry[];
+  optimisation_library:    OptimisationLibraryEntry[];
+}

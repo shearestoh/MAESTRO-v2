@@ -1,7 +1,6 @@
 @import "tailwindcss";
 
 @layer base {
-  /* ── Light mode defaults ── */
   * {
     border-color: #e2e8f0;
   }
@@ -12,54 +11,29 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  /* ── Dark mode overrides ── */
-  .dark * {
-    border-color: #334155;
-  }
-  .dark body {
-    background-color: #0a0f1e;   /* original dark navy */
-    color: #e2e8f0;
-  }
-
-  /* ── Scrollbar — light ── */
   ::-webkit-scrollbar       { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: #f1f5f9; }
   ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
   ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-
-  /* ── Scrollbar — dark ── */
-  .dark ::-webkit-scrollbar-track { background: #0f172a; }
-  .dark ::-webkit-scrollbar-thumb { background: #334155; }
-  .dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }
 }
 
 @layer components {
-
-  /* ── Glass panel ── */
   .glass-panel {
-    background-color: rgba(255, 255, 255, 0.95);
+    background-color: #ffffff;
     border: 1px solid #e2e8f0;
     border-radius: 0.75rem;
   }
-  .dark .glass-panel {
-    background-color: rgba(30, 41, 59, 0.8);
-    backdrop-filter: blur(4px);
-    border-color: #334155;
-  }
 
-  /* ── Glow effects ── */
-  .glow-blue  { box-shadow: 0 0 12px 2px rgba(59,  130, 246, 0.35); }
-  .glow-green { box-shadow: 0 0 12px 2px rgba(34,  197,  94, 0.35); }
-  .glow-amber { box-shadow: 0 0 12px 2px rgba(245, 158,  11, 0.35); }
-  .glow-red   { box-shadow: 0 0 12px 2px rgba(239,  68,  68, 0.35); }
+  .glow-blue  { box-shadow: 0 0 12px 2px rgba(59,  130, 246, 0.25); }
+  .glow-green { box-shadow: 0 0 12px 2px rgba(34,  197,  94, 0.25); }
+  .glow-amber { box-shadow: 0 0 12px 2px rgba(245, 158,  11, 0.25); }
+  .glow-red   { box-shadow: 0 0 12px 2px rgba(239,  68,  68, 0.25); }
 
-  /* ── Status dots ── */
   .status-dot         { width: 0.5rem; height: 0.5rem; border-radius: 9999px; display: inline-block; }
   .status-dot.active  { background-color: #22c55e; animation: pulse 2s infinite; }
   .status-dot.idle    { background-color: #94a3b8; }
   .status-dot.error   { background-color: #ef4444; animation: pulse 2s infinite; }
 
-  /* ── React Flow — light ── */
   .react-flow__background   { background-color: #f8fafc !important; }
   .react-flow__controls     { background: #ffffff !important; border-color: #e2e8f0 !important; }
   .react-flow__controls-button {
@@ -69,17 +43,6 @@
   }
   .react-flow__controls-button:hover { background: #f1f5f9 !important; }
   .react-flow__minimap      { background: #ffffff !important; border: 1px solid #e2e8f0 !important; }
-
-  /* ── React Flow — dark ── */
-  .dark .react-flow__background   { background-color: #0a0f1e !important; }
-  .dark .react-flow__controls     { background: #1e293b !important; border-color: #334155 !important; }
-  .dark .react-flow__controls-button {
-    background: #1e293b !important;
-    border-color: #334155 !important;
-    color: #94a3b8 !important;
-  }
-  .dark .react-flow__controls-button:hover { background: #334155 !important; }
-  .dark .react-flow__minimap      { background: #1e293b !important; border-color: #334155 !important; }
 }
 
 @keyframes fadeIn  { from { opacity: 0; }                            to { opacity: 1; }               }

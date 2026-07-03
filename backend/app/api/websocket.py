@@ -1,11 +1,6 @@
 """
 WebSocket endpoint — streams live agent events to the browser.
-
-Key design:
-- Drains ALL queued events per tick (not capped at 5)
-- Sends state_update after EVERY event so frontend refreshes
-  equipment status immediately — this is what makes nodes glow
-- job_complete event triggers final state refresh + clears spinner
+Drains all queued events per tick and sends a state_update after each.
 """
 from __future__ import annotations
 
@@ -30,7 +25,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     try:
         while True:
-            # ── Drain ALL queued events ───────────────────────────────────
             events_sent = 0
             while session.live_event_queue:
                 event = session.live_event_queue[0]
@@ -45,7 +39,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     session.live_event_queue.pop(0)
                     events_sent += 1
 
-                    # Send state_update after every event
                     await websocket.send_text(json.dumps({
                         "event_type": "state_update",
                         "message":    event.message,
@@ -56,11 +49,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             "background_job_status": session.background_job_status,
                             "background_job_index":  session.background_job_index,
                             "triggered_by":          event.event_type,
-                            # ── Fix: signal job_complete explicitly ───────
-                            # Frontend useWebSocket checks this flag to
-                            # trigger a final refreshState() call that
-                            # clears the spinner and updates timeline.
-                            "job_complete": event.event_type == "job_complete",
+                            "job_complete":          event.event_type == "job_complete",
                         },
                     }))
 
@@ -69,7 +58,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 except Exception:
                     break
 
-            # ── Heartbeat when background job is running ──────────────────
             current_status = session.background_job_status
             job_active     = session.background_job_active
 
@@ -90,7 +78,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 except Exception:
                     break
 
-            # ── Final notification when job completes ─────────────────────
             elif (
                 not job_active
                 and current_status != last_job_status

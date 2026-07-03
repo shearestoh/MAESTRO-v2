@@ -2,8 +2,9 @@ import { useEffect, useRef, useCallback } from "react";
 import { useMaestroStore } from "@/store/maestroStore";
 import type { WsEvent } from "@/types";
 
-const RECONNECT_DELAY = 2500;
-const MAX_RECONNECTS  = 10;
+const BASE_RECONNECT_DELAY = 1000;
+const MAX_RECONNECT_DELAY  = 30000;
+const MAX_RECONNECTS       = 12;
 
 export function useWebSocket() {
   const sessionId    = useMaestroStore((s) => s.sessionId);
@@ -35,30 +36,18 @@ export function useWebSocket() {
       try {
         const event = JSON.parse(ev.data as string) as WsEvent;
 
-        // Push all non-heartbeat events to the visible feed
         if (event.event_type !== "state_update") {
           pushWsEvent(event);
         }
 
-        // Refresh on state_update
         if (event.event_type === "state_update") {
           refreshState();
-
           const payload = event.payload as Record<string, unknown>;
-
-          // ── Fix: job_complete flag triggers immediate + delayed refresh ──
-          // This ensures the spinner clears and timeline updates correctly
-          // even if the background thread sets state slightly after the
-          // WebSocket tick.
           if (payload.job_complete === true) {
-            // Immediate refresh
             refreshState();
-            // Delayed refresh — catches any state written after job_complete
             setTimeout(() => refreshState(), 300);
             setTimeout(() => refreshState(), 800);
           }
-
-          // Legacy: completed status check
           if (
             payload.background_job_active === false &&
             payload.background_job_status === "completed"
@@ -67,11 +56,9 @@ export function useWebSocket() {
           }
         }
 
-        // Refresh on equipment events (node lighting)
         if (event.equipment !== null && event.equipment !== undefined) {
           refreshState();
         }
-
       } catch {
         // ignore malformed frames
       }
@@ -81,8 +68,12 @@ export function useWebSocket() {
       setConnected(false);
       if (!mounted.current) return;
       if (reconnects.current < MAX_RECONNECTS) {
+        const delay = Math.min(
+          BASE_RECONNECT_DELAY * Math.pow(2, reconnects.current),
+          MAX_RECONNECT_DELAY,
+        );
         reconnects.current += 1;
-        timerRef.current = setTimeout(connect, RECONNECT_DELAY);
+        timerRef.current = setTimeout(connect, delay);
       }
     };
 

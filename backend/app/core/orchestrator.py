@@ -1,10 +1,9 @@
 """
-Session management and background job execution.
+Session management and workflow execution.
 
-Phase 3: domain-agnostic condition labels throughout.
-- session_state_payload() uses active_condition_key for metric labels
-- _mark_done() summary uses general condition fields
-- active_condition_key synced from extracted campaign
+All actions that use physical instruments require user approval via the
+workflow plan before execution. Non-instrument actions (analysis, plotting,
+database queries, RAG) execute immediately.
 """
 from __future__ import annotations
 
@@ -15,8 +14,7 @@ import uuid
 from typing import Dict
 
 from app.core.database import ensure_db, init_db, query_database
-from app.core.llm import _SYSTEM_PROMPT_CONTENT, llm_plan
-from app.core.lab import advance_to_next_day
+from app.core.llm import _SYSTEM_PROMPT_CONTENT, llm_plan, _NON_INSTRUMENT_ACTIONS
 from app.core.models import (
     AgentStateModel,
     ArtifactModel,
@@ -28,10 +26,18 @@ from app.core.tools import (
     build_dynamic_timeline,
     build_execution_plan_from_tool_calls,
     execute_plan_step,
+    compute_projected_schedule,
 )
 
 SESSIONS:      Dict[str, SessionModel]    = {}
 SESSION_LOCKS: Dict[str, threading.Lock] = {}
+
+_INSTRUMENT_STEP_KINDS = {
+    "prepare_sample",
+    "test_sample",
+    "optimise_condition",
+    "extract_feasibility",
+}
 
 
 def _lock_for(session_id: str) -> threading.Lock:
@@ -41,21 +47,31 @@ def _lock_for(session_id: str) -> threading.Lock:
 
 
 def _welcome_message() -> dict:
+    from datetime import datetime
+    now   = datetime.now()
+    hour  = now.hour
+    ts    = now.strftime("%A, %d %B %Y %H:%M")
+    is_office = 9 <= hour < 17
+    office_note = (
+        "We're currently within office hours (09:00–17:00)."
+        if is_office else
+        f"Note: it's currently {ts}, outside standard office hours (09:00–17:00). "
+        "I can still operate the lab — let me know if you'd like to proceed."
+    )
     return {
         "role": "assistant",
         "content": (
-            "Welcome to **MAESTRO v3** — your agentic scientific orchestrator.\n\n"
-            "You can:\n"
-            "- Design and run optimisation campaigns\n"
-            "- Upload a paper PDF for reproduction\n"
-            "- Query your experimental results\n"
-            "- Add tools to your virtual lab via the Lab Builder\n\n"
-            "What would you like to explore today?"
+            f"Welcome to **MAESTRO** — your agentic scientific orchestrator.\n\n"
+            f"{office_note}\n\n"
+            f"You can:\n"
+            f"- Design and run experimental campaigns\n"
+            f"- Upload papers to the Library for reference and reproduction\n"
+            f"- Query and analyse your experimental results\n"
+            f"- Configure your lab via Lab Setup\n\n"
+            f"What would you like to explore today?"
         ),
     }
 
-
-# ── Session lifecycle ─────────────────────────────────────────────────────────
 
 def create_session() -> SessionModel:
     ensure_db()
@@ -69,7 +85,7 @@ def create_session() -> SessionModel:
     session = SessionModel(
         session_id=session_id,
         agent_state=agent_state,
-        current_mission="Awaiting scientific instruction.",
+        current_mission="Awaiting instruction.",
     )
     SESSIONS[session_id] = session
     return session
@@ -87,18 +103,25 @@ def reset_session(session_id: str) -> SessionModel:
     return create_session()
 
 
-# ── User message handling ─────────────────────────────────────────────────────
+def _plan_requires_approval(plan: list) -> bool:
+    return any(step.get("kind") in _INSTRUMENT_STEP_KINDS for step in plan)
+
 
 def post_user_message(session_id: str, text: str) -> SessionModel:
-    """Called from API request thread — LLM call is safe here."""
     session = get_session(session_id)
     lock    = _lock_for(session_id)
 
     with lock:
+
+        if session.pending_plan is not None:
+            session.pending_plan = None
+            session.agent_state.awaiting_confirmation = False
+            session.agent_state.pending_tool_calls    = []
+
         session.agent_state.messages.append({"role": "user", "content": text})
-        session.current_mission      = text
-        session.equipment_status     = EquipmentStatusModel(llm=True)
-        session.current_activity     = "Thinking..."
+        session.current_mission  = text
+        session.equipment_status = EquipmentStatusModel(llm=True)
+        session.current_activity = "Thinking..."
         session.live_event_queue.append(ExecutionEvent(
             event_type="llm_thinking",
             message="Thinking...",
@@ -109,225 +132,16 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
 
     llm_plan(session)
 
-    # Auto-approve feasibility checks
     if session.agent_state.awaiting_confirmation:
-        pending_names = [
-            tc["function"]["name"]
-            for tc in session.agent_state.pending_tool_calls
-        ]
-        all_feasibility = all(
-            n == "extract_and_check_feasibility"
-            for n in pending_names
-        )
-        if all_feasibility:
-            pending_calls = list(session.agent_state.pending_tool_calls)
+        pending_calls = list(session.agent_state.pending_tool_calls)
+        pending_names = [tc["function"]["name"] for tc in pending_calls]
 
-            with lock:
-                session.agent_state.awaiting_confirmation = False
-                session.agent_state.pending_tool_calls    = []
-                session.equipment_status = EquipmentStatusModel(knowledge=True)
-                session.current_activity = "Checking feasibility..."
+        plan = build_execution_plan_from_tool_calls(session, pending_calls)
 
-            for tc in pending_calls:
-                args = {}
-                try:
-                    args = json.loads(tc["function"]["arguments"] or "{}")
-                except Exception:
-                    pass
-                case_name = args.get("case_name", "Case Study")
-
-                session.agent_state.messages.append({
-                    "role":         "tool",
-                    "tool_call_id": tc["id"],
-                    "name":         tc["function"]["name"],
-                    "content":      json.dumps({
-                        "status":    "running",
-                        "case_name": case_name,
-                    }),
-                })
-
-                step = {"kind": "extract_feasibility", "case_name": case_name}
-                try:
-                    execute_plan_step(session, step, query_database)
-                    # Sync active_condition_key after extraction
-                    _sync_condition_key(session)
-                except Exception as e:
-                    session.agent_state.messages.append({
-                        "role":    "assistant",
-                        "content": f"Error during feasibility check: `{e}`",
-                    })
-
-            with lock:
-                session.equipment_status = EquipmentStatusModel()
-                session.current_activity = None
-
-    # Auto-handle plan_workflow — store plan on session, show in editor
-    if session.agent_state.awaiting_confirmation:
-        pending_names = [
-            tc["function"]["name"]
-            for tc in session.agent_state.pending_tool_calls
-        ]
-        has_plan_workflow = any(n == "plan_workflow" for n in pending_names)
-
-        if has_plan_workflow:
-            for tc in session.agent_state.pending_tool_calls:
-                if tc["function"]["name"] == "plan_workflow":
-                    args = {}
-                    try:
-                        args = json.loads(tc["function"]["arguments"] or "{}")
-                    except Exception:
-                        pass
-
-                    from app.core.models import WorkflowPlan, WorkflowStep
-                    steps = []
-                    for s in args.get("steps", []):
-                        # Set editable_fields based on step kind
-                        editable = []
-                        if s.get("kind") == "optimise_condition":
-                            editable = ["n_calls", "n_initial_points", "condition_value"]
-                            for fp in s.get("free_params", []):
-                                editable += [f"{fp['name']}_min", f"{fp['name']}_max"]
-                        elif s.get("kind") in ("prepare_sample", "test_sample"):
-                            editable = list(s.get("params", {}).keys()) + list(s.get("conditions", {}).keys())
-                        s["editable_fields"] = editable
-                        steps.append(WorkflowStep(**s))
-
-                    session.pending_plan = WorkflowPlan(
-                        summary=args.get("summary", "Proposed workflow"),
-                        steps=steps,
-                        source="agent",
-                    )
-                    # Keep awaiting_confirmation=True so frontend shows editor
-                    break
-
-    # Handle prepare_sample / test_sample / list_samples directly
-    # (no approval needed for single instrument actions)
-    if session.agent_state.awaiting_confirmation:
-        pending_names = [
-            tc["function"]["name"]
-            for tc in session.agent_state.pending_tool_calls
-        ]
-        single_instrument_actions = {
-            "prepare_sample",
-            "test_sample",
-            "list_samples",
-            "plotter",
-            "query_database",
-        }
-        all_single = all(n in single_instrument_actions for n in pending_names)
-
-        if all_single:
-            pending_calls = list(session.agent_state.pending_tool_calls)
-            with lock:
-                session.agent_state.awaiting_confirmation = False
-                session.agent_state.pending_tool_calls    = []
-
-            dag_context = {}
-            for tc in pending_calls:
-                args = {}
-                try:
-                    args = json.loads(tc["function"]["arguments"] or "{}")
-                except Exception:
-                    pass
-
-                name = tc["function"]["name"]
-                session.agent_state.messages.append({
-                    "role":         "tool",
-                    "tool_call_id": tc["id"],
-                    "name":         name,
-                    "content":      json.dumps({"status": "running"}),
-                })
-
-                if name == "prepare_sample":
-                    step = {
-                        "kind":       "prepare_sample",
-                        "params":     args.get("params", {}),
-                        "instrument": "SamplerAgent",
-                        "produces":   "sample_id",
-                    }
-                    try:
-                        execute_plan_step(session, step, query_database, dag_context)
-                    except Exception as e:
-                        session.agent_state.messages.append({
-                            "role": "assistant",
-                            "content": f"Error preparing sample: `{e}`",
-                        })
-
-                elif name == "test_sample":
-                    step = {
-                        "kind":       "test_sample",
-                        "sample_ref": args.get("sample_id", ""),
-                        "conditions": args.get("conditions", {}),
-                        "measures":   args.get("measures", "specific_energy"),
-                        "instrument": "TesterAgent",
-                    }
-                    try:
-                        execute_plan_step(session, step, query_database, dag_context)
-                    except Exception as e:
-                        session.agent_state.messages.append({
-                            "role": "assistant",
-                            "content": f"Error testing sample: `{e}`",
-                        })
-
-                elif name == "list_samples":
-                    try:
-                        execute_plan_step(session, {"kind": "list_samples"}, query_database, dag_context)
-                    except Exception as e:
-                        session.agent_state.messages.append({
-                            "role": "assistant",
-                            "content": f"Error listing samples: `{e}`",
-                        })            
-                elif name == "plotter":
-                    step = {"kind": "plotter"}
-                    try:
-                        execute_plan_step(session, step, query_database, dag_context)
-                    except Exception as e:
-                        session.agent_state.messages.append({
-                            "role": "assistant",
-                            "content": f"Error generating plot: `{e}`",
-                        })
-
-                elif name == "query_database":
-                    args_parsed = {}
-                    try:
-                        args_parsed = json.loads(tc["function"]["arguments"] or "{}")
-                    except Exception:
-                        pass
-                    step = {
-                        "kind":        "query_database",
-                        "sql":         args_parsed.get("sql", ""),
-                        "description": args_parsed.get("description", ""),
-                    }
-                    try:
-                        execute_plan_step(session, step, query_database, dag_context)
-                    except Exception as e:
-                        session.agent_state.messages.append({
-                            "role": "assistant",
-                            "content": f"Error querying database: `{e}`",
-                        })
-
-    # Auto-handle resume_outstanding_tasks
-    if session.agent_state.awaiting_confirmation:
-        pending_names = [
-            tc["function"]["name"]
-            for tc in session.agent_state.pending_tool_calls
-        ]
-        if any(n == "resume_outstanding_tasks" for n in pending_names):
-            pending_calls = list(session.agent_state.pending_tool_calls)
-            with lock:
-                session.agent_state.awaiting_confirmation = False
-                session.agent_state.pending_tool_calls    = []
-
-            for tc in pending_calls:
-                if tc["function"]["name"] == "resume_outstanding_tasks":
-                    session.agent_state.messages.append({
-                        "role":         "tool",
-                        "tool_call_id": tc["id"],
-                        "name":         tc["function"]["name"],
-                        "content":      json.dumps({"status": "running"}),
-                    })
-                    resume_outstanding_tasks(session_id)
-                    break
+        if _plan_requires_approval(plan):
+            _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_names)
+        else:
+            _execute_non_instrument_actions(session, lock, plan, pending_calls)
 
     with lock:
         session.equipment_status = EquipmentStatusModel()
@@ -342,26 +156,235 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
 
     return session
 
+
+def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_names):
+    has_plan_workflow = any(n == "plan_workflow" for n in pending_names)
+    has_feasibility   = any(n == "extract_and_check_feasibility" for n in pending_names)
+
+    if has_feasibility:
+        with lock:
+            session.agent_state.awaiting_confirmation = False
+            session.agent_state.pending_tool_calls    = []
+            session.equipment_status = EquipmentStatusModel(knowledge=True)
+            session.current_activity = "Checking feasibility..."
+
+        for tc in pending_calls:
+            if tc["function"]["name"] == "extract_and_check_feasibility":
+                args = {}
+                try:
+                    args = json.loads(tc["function"]["arguments"] or "{}")
+                except Exception:
+                    pass
+                case_name = args.get("case_name", "Case Study")
+                session.agent_state.messages.append({
+                    "role":         "tool",
+                    "tool_call_id": tc["id"],
+                    "name":         tc["function"]["name"],
+                    "content":      json.dumps({"status": "running", "case_name": case_name}),
+                })
+                step = {"kind": "extract_feasibility", "case_name": case_name}
+                try:
+                    execute_plan_step(session, step, query_database)
+                    _sync_condition_key(session)
+                    _auto_build_campaign_plan(session)
+                except Exception as e:
+                    session.agent_state.messages.append({
+                        "role": "assistant", "content": f"Error during feasibility check: `{e}`"
+                    })
+
+        with lock:
+            session.equipment_status = EquipmentStatusModel()
+            session.current_activity = None
+        return
+
+    if has_plan_workflow:
+        for tc in pending_calls:
+            if tc["function"]["name"] == "plan_workflow":
+                args = {}
+                try:
+                    args = json.loads(tc["function"]["arguments"] or "{}")
+                except Exception:
+                    pass
+                from app.core.models import WorkflowPlan, WorkflowStep
+                steps = []
+                for s in args.get("steps", []):
+                    editable = []
+                    if s.get("kind") == "optimise_condition":
+                        editable = ["n_calls", "n_initial_points", "condition_value"]
+                        for fp in s.get("free_params", []):
+                            editable += [f"{fp['name']}_min", f"{fp['name']}_max"]
+                    elif s.get("kind") in ("prepare_sample", "test_sample"):
+                        editable = list(s.get("params", {}).keys()) + list(s.get("conditions", {}).keys())
+                    s["editable_fields"] = editable
+                    steps.append(WorkflowStep(**s))
+
+                session.pending_plan = WorkflowPlan(
+                    summary=args.get("summary", "Proposed workflow"),
+                    steps=steps,
+                    source="agent",
+                )
+                break
+        return
+
+    session.pending_plan = None
+    with lock:
+        from app.core.models import WorkflowPlan, WorkflowStep
+        steps = []
+        for step in plan:
+            if step.get("kind") in _INSTRUMENT_STEP_KINDS:
+                steps.append(WorkflowStep(**{
+                    k: v for k, v in step.items()
+                    if k in WorkflowStep.model_fields
+                }))
+        if steps:
+            session.pending_plan = WorkflowPlan(
+                summary="Proposed workflow",
+                steps=steps,
+                source="agent",
+            )
+
+
+def _auto_build_campaign_plan(session):
+    if not session.extracted_campaign:
+        return
+    c = session.extracted_campaign
+    param_lookup = {p["name"].lower(): p for p in c.parameter_space}
+    operating_conditions = c.operating_conditions
+
+    from app.core.models import WorkflowPlan, WorkflowStep
+    steps = []
+
+    if not operating_conditions:
+        step_id = str(uuid.uuid4())[:8]
+        steps.append(WorkflowStep(
+            step_id=step_id,
+            kind="optimise_condition",
+            label="BO Campaign",
+            condition_label="run",
+            condition_value=1.0,
+            condition_unit="",
+            free_params=_resolve_free_params_from_lookup(param_lookup),
+            objective_metric=c.objective_metric or "objective",
+            n_calls=session.optimiser_config.n_calls,
+            n_initial_points=session.optimiser_config.n_initial_points,
+            instrument_id="optimiser",
+            status="pending",
+        ))
+    else:
+        primary_oc = operating_conditions[0]
+        session.active_condition_key = primary_oc.get("name", "condition")
+        for oc in operating_conditions:
+            oc_name   = oc.get("name", "condition")
+            oc_unit   = oc.get("unit", "")
+            oc_values = oc.get("values", [])
+            for value in oc_values:
+                step_id = str(uuid.uuid4())[:8]
+                steps.append(WorkflowStep(
+                    step_id=step_id,
+                    kind="optimise_condition",
+                    label=f"BO @ {oc_name}={value} {oc_unit}",
+                    condition_label=oc_name,
+                    condition_value=float(value),
+                    condition_unit=oc_unit,
+                    free_params=_resolve_free_params_from_lookup(param_lookup),
+                    objective_metric=c.objective_metric or "objective",
+                    n_calls=session.optimiser_config.n_calls,
+                    n_initial_points=session.optimiser_config.n_initial_points,
+                    instrument_id="optimiser",
+                    status="pending",
+                ))
+
+    if steps:
+        session.pending_plan = WorkflowPlan(
+            summary=f"Reproduce: {c.target_case_study}",
+            steps=steps,
+            source="paper",
+        )
+
+
+def _resolve_free_params_from_lookup(param_lookup: Dict[str, dict]) -> list:
+    free_params = []
+    for name, p in param_lookup.items():
+        p_min = p.get("min")
+        p_max = p.get("max")
+        if p_min is None or p_max is None:
+            continue
+        free_params.append({
+            "name": p.get("name", name),
+            "min":  float(p_min),
+            "max":  float(p_max),
+            "unit": p.get("unit", ""),
+        })
+    return free_params
+
+
+def _execute_non_instrument_actions(session, lock, plan, pending_calls):
+    with lock:
+        session.agent_state.awaiting_confirmation = False
+        session.agent_state.pending_tool_calls    = []
+
+    dag_context = {}
+    for tc in pending_calls:
+        name = tc["function"]["name"]
+        args = {}
+        try:
+            args = json.loads(tc["function"]["arguments"] or "{}")
+        except Exception:
+            pass
+
+        session.agent_state.messages.append({
+            "role":         "tool",
+            "tool_call_id": tc["id"],
+            "name":         name,
+            "content":      json.dumps({"status": "running"}),
+        })
+
+        step_kind_map = {
+            "list_samples":  "list_samples",
+            "generate_plot": "generate_plot",
+            "analyse_data":  "analyse_data",
+            "query_database":"query_database",
+        }
+
+        if name in step_kind_map:
+            step = {
+                "kind":          step_kind_map[name],
+                "label":         args.get("description", name),
+                "plot_code":     args.get("plot_code", ""),
+                "analysis_code": args.get("analysis_code", ""),
+                "sql":           args.get("sql", ""),
+                "description":   args.get("description", ""),
+            }
+            try:
+                execute_plan_step(session, step, query_database, dag_context)
+            except Exception as e:
+                session.agent_state.messages.append({
+                    "role": "assistant", "content": f"Error: `{e}`"
+                })
+
+
 def _sync_condition_key(session: SessionModel):
     if session.extracted_campaign:
         ocs = session.extracted_campaign.operating_conditions
         if ocs:
-            session.active_condition_key = ocs[0].get("name", "power_W")
+            session.active_condition_key = ocs[0].get("name", "condition")
+
 
 def execute_plan(session_id: str, plan_dict: dict) -> SessionModel:
-    """
-    Execute a WorkflowPlan that was approved (and optionally edited)
-    by the user in the WorkflowPlanEditor.
-
-    Called from POST /execute-plan.
-    Converts the plan dict into background job steps and starts execution.
-    """
     from app.core.models import WorkflowPlan
+    from app.core.config import DB_PATH
+
     session = get_session(session_id)
     lock    = _lock_for(session_id)
 
     plan  = WorkflowPlan(**plan_dict)
     steps = [step.model_dump() for step in plan.steps]
+
+    projected = compute_projected_schedule(
+        plan=steps,
+        current_clock_min=float(session.virtual_clock_minutes),
+        lab_end_min=480.0,
+    )
 
     with lock:
         session.background_job_plan        = steps
@@ -372,10 +395,9 @@ def execute_plan(session_id: str, plan_dict: dict) -> SessionModel:
         session.background_job_error       = None
         session.live_event_queue           = []
         session.pending_plan               = None
+        session.projected_schedule         = projected
         session.agent_state.awaiting_confirmation = False
         session.agent_state.pending_tool_calls    = []
-
-        # Inject tool response for plan_workflow tool call
         _inject_missing_tool_responses(session)
 
     threading.Thread(
@@ -387,52 +409,39 @@ def execute_plan(session_id: str, plan_dict: dict) -> SessionModel:
 
     return session
 
+
 def resume_outstanding_tasks(session_id: str) -> SessionModel:
-    """
-    Advance to next day and re-queue all outstanding tasks for execution.
-    Called when user says 'continue tomorrow' or similar.
-    """
     session = get_session(session_id)
     lock    = _lock_for(session_id)
 
-    # Advance virtual clock
-    advance_to_next_day(session)
+    session.virtual_day_index    += 1
+    session.virtual_clock_minutes = 0
 
     outstanding = list(session.outstanding_tasks)
     if not outstanding:
         session.agent_state.messages.append({
             "role":    "assistant",
-            "content": (
-                f"Advanced to Day {session.virtual_day_index}. "
-                f"No outstanding tasks to resume."
-            ),
+            "content": "No outstanding tasks to resume.",
         })
         return session
 
-    # Build plan from outstanding tasks
     plan = []
     for task in outstanding:
-        kind = task.get("kind", "optimise_condition")
-        if kind in ("optimise_condition", "optimise_power"):
-            plan.append({
-                "kind":             "optimise_condition",
-                "condition_label":  task.get("condition_label", "power_W"),
-                "condition_value":  float(task.get("condition_value", task.get("power_W", 0))),
-                "condition_unit":   task.get("condition_unit", ""),
-                "free_params":      task.get("free_params", [
-                    {"name": "active_material", "min": 88.0, "max": 98.0, "unit": "wt%"},
-                    {"name": "porosity",        "min": 20.0, "max": 60.0, "unit": "%"},
-                ]),
-                "objective_metric": task.get("objective_metric", "specific_energy"),
-                "n_calls":          int(task.get("remaining_n_calls", 20)),
-                "n_initial_points": 3,   # fewer init points for resumption
-            })
+        plan.append({
+            "kind":             "optimise_condition",
+            "condition_label":  task.get("condition_label", "condition"),
+            "condition_value":  float(task.get("condition_value", 0)),
+            "condition_unit":   task.get("condition_unit", ""),
+            "free_params":      task.get("free_params", []),
+            "objective_metric": task.get("objective_metric", "objective"),
+            "n_calls":          int(task.get("remaining_n_calls", 20)),
+            "n_initial_points": 3,
+        })
 
     if not plan:
         return session
 
     with lock:
-        # Clear outstanding tasks — they're now in the plan
         session.outstanding_tasks          = []
         session.background_job_plan        = plan
         session.background_job_index       = 0
@@ -446,11 +455,7 @@ def resume_outstanding_tasks(session_id: str) -> SessionModel:
 
     session.agent_state.messages.append({
         "role":    "assistant",
-        "content": (
-            f"▶️ **Resuming on Day {session.virtual_day_index}.**\n\n"
-            f"Queued {len(plan)} incomplete run(s) for execution. "
-            f"The workflow is now running."
-        ),
+        "content": f"▶️ Resuming {len(plan)} incomplete run(s).",
     })
 
     threading.Thread(
@@ -462,27 +467,19 @@ def resume_outstanding_tasks(session_id: str) -> SessionModel:
 
     return session
 
-# ── Live event consumption ────────────────────────────────────────────────────
 
 def _consume_one_live_event(session: SessionModel):
-    """Pop one event and update session UI state. Call under lock."""
     if not session.live_event_queue:
         return
-
     event = session.live_event_queue.pop(0)
     session.current_activity     = event.message
     session.background_job_label = event.message
     session.activity_log.append(f"[{event.category.upper()}] {event.message}")
     session.activity_log = session.activity_log[-20:]
-
     session.equipment_status = EquipmentStatusModel()
     eq_map = {
-        "llm":       "llm",
-        "optimiser": "optimiser",
-        "sampler":   "sampler",
-        "tester":    "tester",
-        "memory":    "memory",
-        "knowledge": "knowledge",
+        "llm": "llm", "optimiser": "optimiser", "sampler": "sampler",
+        "tester": "tester", "memory": "memory", "knowledge": "knowledge",
         "reporting": "reporting",
     }
     eq_key = eq_map.get(event.equipment or "")
@@ -490,9 +487,7 @@ def _consume_one_live_event(session: SessionModel):
         setattr(session.equipment_status, eq_key, True)
 
 
-# ── Background job runner ─────────────────────────────────────────────────────
 def _inject_missing_tool_responses(session: SessionModel):
-    """Repair orphaned tool_call_ids in message history."""
     messages = session.agent_state.messages
     responded_ids: set[str] = set()
     for msg in messages:
@@ -500,7 +495,6 @@ def _inject_missing_tool_responses(session: SessionModel):
             tc_id = msg.get("tool_call_id")
             if tc_id:
                 responded_ids.add(tc_id)
-
     injections = []
     for i, msg in enumerate(messages):
         if msg.get("role") != "assistant":
@@ -515,31 +509,47 @@ def _inject_missing_tool_responses(session: SessionModel):
                     "name":         tc_name,
                     "content":      json.dumps({
                         "status":  "completed",
-                        "message": f"Tool '{tc_name}' executed successfully.",
+                        "message": f"Tool '{tc_name}' executed.",
                     }),
                 }))
                 responded_ids.add(tc_id)
-
     for insert_idx, tool_msg in reversed(injections):
         messages.insert(insert_idx, tool_msg)
 
-def _run_background_job(session_id: str):
-    """
-    Worker thread: executes the approved plan step by step.
 
-    Invariants:
-    - Never calls LLM
-    - Each step wrapped in try/except
-    - Always sets background_job_active=False on exit
-    - Lock held only for state mutations
-    - dag_context shared across all steps for DAG variable resolution
-    """
+def _run_background_job(session_id: str):
     session     = get_session(session_id)
     lock        = _lock_for(session_id)
-    dag_context: dict = {}   # shared across all steps in this job
+    dag_context: dict = {}
+
+    instrument_locks: dict[str, threading.Lock] = {}
+
+    def get_instrument_lock(instrument_id: str) -> threading.Lock:
+        if instrument_id not in instrument_locks:
+            instrument_locks[instrument_id] = threading.Lock()
+        return instrument_locks[instrument_id]
+
+    def set_step_status(step_id: str, status: str):
+        with lock:
+            session.step_statuses[step_id] = status
+
+    def get_step_status(step_id: str) -> str:
+        with lock:
+            return session.step_statuses.get(step_id, "pending")
+
+    def all_dependencies_complete(step: dict) -> bool:
+        return all(
+            get_step_status(dep_id) == "completed"
+            for dep_id in step.get("dependencies", [])
+        )
+
+    with lock:
+        for step in session.background_job_plan:
+            step_id = step.get("step_id", "")
+            if step_id:
+                session.step_statuses[step_id] = "pending"
 
     def mark_done(success: bool, error_msg: str = ""):
-        """Inner helper — closes over session and lock."""
         with lock:
             session.background_job_active  = False
             session.background_job_status  = "completed" if success else "failed"
@@ -547,7 +557,6 @@ def _run_background_job(session_id: str):
             session.current_activity       = None
             session.equipment_status       = EquipmentStatusModel()
             session.pending_plan           = None
-
             _inject_missing_tool_responses(session)
 
             if not success:
@@ -555,9 +564,9 @@ def _run_background_job(session_id: str):
                 session.agent_state.messages.append({
                     "role":    "assistant",
                     "content": (
-                        f"⚠️ The workflow stopped due to an error.\n\n"
+                        f"⚠️ Workflow stopped due to an error.\n\n"
                         f"**Details:** `{error_msg}`\n\n"
-                        f"Any results collected before the error have been saved."
+                        f"Results collected before the error have been saved."
                     ),
                 })
             else:
@@ -565,8 +574,7 @@ def _run_background_job(session_id: str):
                 n_evals  = sum(len(r.get("X", [])) for r in results)
                 n_fails  = sum(r.get("failed_samples", 0) for r in results)
                 best_obj = max(
-                    (r.get("best_objective") or r.get("best_energy") or 0.0
-                     for r in results),
+                    (r.get("best_objective") or 0.0 for r in results),
                     default=0.0,
                 )
                 obj_label  = (
@@ -574,23 +582,13 @@ def _run_background_job(session_id: str):
                     if session.extracted_campaign else "objective"
                 )
                 cond_label = session.active_condition_key or "condition"
-
                 conds_done = [
-                    f"{r.get('condition_label', cond_label)}"
-                    f"={r.get('condition_value', r.get('power_W', '?'))}"
+                    f"{r.get('condition_label', cond_label)}={r.get('condition_value', '?')}"
                     for r in results if r.get("X")
                 ]
 
-                outstanding      = session.outstanding_tasks
-                outstanding_note = ""
-                if outstanding:
-                    outstanding_note = (
-                        f"\n\n⏳ **{len(outstanding)} incomplete run(s)** — "
-                        f"lab time ran out."
-                    )
-
                 is_plotter_job = any(
-                    step.get("kind") == "plotter"
+                    step.get("kind") in ("generate_plot",)
                     for step in session.background_job_plan
                 )
 
@@ -598,13 +596,8 @@ def _run_background_job(session_id: str):
                     session.agent_state.messages.append({
                         "role":    "assistant",
                         "content": (
-                            f"Here is the optimisation summary figure:\n\n"
-                            f"![Optimisation Summary]"
-                            f"(/api/plot/{session.session_id})\n\n"
-                            f"The figure shows the parameter space explored at each "
-                            f"operating condition, with the optimal parameter path in "
-                            f"the final panel. Ask me to analyse the results or "
-                            f"continue tomorrow."
+                            f"Here is the summary figure:\n\n"
+                            f"![Summary](/api/plot/{session.session_id})"
                         ),
                     })
                 elif n_evals > 0:
@@ -612,20 +605,15 @@ def _run_background_job(session_id: str):
                         "role":    "assistant",
                         "content": (
                             f"✅ **Workflow complete.**\n\n"
-                            f"| Metric | Value |\n"
-                            f"|--------|-------|\n"
+                            f"| Metric | Value |\n|--------|-------|\n"
                             f"| Experiments run | {n_evals} |\n"
                             f"| Best {obj_label} | {best_obj:.4f} |\n"
                             f"| Failed steps | {n_fails} |\n"
-                            f"| Conditions completed | "
-                            f"{', '.join(conds_done) or 'none'} |"
-                            f"{outstanding_note}\n\n"
-                            f"Ask me to **generate a summary figure**, "
-                            f"**analyse the results**, or **continue tomorrow**."
+                            f"| Conditions completed | {', '.join(conds_done) or 'none'} |\n\n"
+                            f"Ask me to **generate a summary figure** or **analyse the results**."
                         ),
                     })
 
-            # Final event to unblock frontend spinner
             session.live_event_queue.append(ExecutionEvent(
                 event_type="job_complete",
                 message="Job finished.",
@@ -637,66 +625,93 @@ def _run_background_job(session_id: str):
                 },
             ))
 
-    try:
-        while True:
+    def execute_step_thread(step: dict):
+        step_id       = step.get("step_id", "")
+        instrument_id = step.get("instrument_id", "unknown")
+        inst_lock     = get_instrument_lock(instrument_id)
+
+        while not all_dependencies_complete(step):
+            deps = step.get("dependencies", [])
+            if any(get_step_status(d) == "failed" for d in deps):
+                set_step_status(step_id, "skipped")
+                return
+            time.sleep(0.1)
+
+        with inst_lock:
+            set_step_status(step_id, "running")
             with lock:
-                has_events = bool(session.live_event_queue)
-                has_steps  = (
-                    session.background_job_index
-                    < len(session.background_job_plan)
-                )
+                session.background_job_label = step.get("label") or step.get("kind", "running")
 
-            if has_events:
+            try:
+                result = execute_plan_step(session, step, query_database, dag_context)
                 with lock:
-                    _consume_one_live_event(session)
-
-            elif has_steps:
+                    session.agent_state.last_tool_result = result
+                if result.get("status") == "error":
+                    set_step_status(step_id, "failed")
+                else:
+                    set_step_status(step_id, "completed")
+            except Exception as step_err:
                 with lock:
-                    step = session.background_job_plan[
-                        session.background_job_index
-                    ]
-                    # Use step label if available, else kind
-                    session.background_job_label  = (
-                        step.get("label") or step.get("kind", "running")
-                    )
-                    session.background_job_status = "running"
+                    session.activity_log.append(f"[WARNING] Step '{step.get('kind')}' error: {step_err}")
+                    session.activity_log = session.activity_log[-20:]
+                set_step_status(step_id, "failed")
 
-                try:
-                    # Pass dag_context so steps can share outputs
-                    result = execute_plan_step(
-                        session, step, query_database, dag_context
-                    )
-                    with lock:
-                        session.agent_state.last_tool_result = result
-                        session.background_job_index += 1
-                except Exception as step_err:
-                    with lock:
-                        session.activity_log.append(
-                            f"[WARNING] Step '{step.get('kind')}' "
-                            f"error: {step_err}"
-                        )
-                        session.activity_log = session.activity_log[-20:]
-                        session.background_job_index += 1  # skip, continue
+        with lock:
+            completed = sum(
+                1 for s in session.background_job_plan
+                if session.step_statuses.get(s.get("step_id", ""), "") == "completed"
+            )
+            session.background_job_index = completed
 
-            else:
-                mark_done(success=True)
-                break
+    try:
+        plan  = session.background_job_plan
+        steps = list(plan)
 
-            time.sleep(0.25)
+        stop_drain = threading.Event()
+
+        def drain_events():
+            while not stop_drain.is_set():
+                with lock:
+                    if session.live_event_queue:
+                        _consume_one_live_event(session)
+                time.sleep(0.08)
+
+        event_thread = threading.Thread(
+            target=drain_events, daemon=True,
+            name=f"maestro-events-{session_id[:8]}"
+        )
+        event_thread.start()
+
+        step_threads = []
+        for step in steps:
+            t = threading.Thread(
+                target=execute_step_thread,
+                args=(step,),
+                daemon=True,
+                name=f"maestro-step-{step.get('step_id', 'x')[:6]}",
+            )
+            step_threads.append(t)
+            t.start()
+
+        for t in step_threads:
+            t.join()
+
+        stop_drain.set()
+        event_thread.join(timeout=1.0)
+
+        time.sleep(0.3)
+        while session.live_event_queue:
+            with lock:
+                _consume_one_live_event(session)
+            time.sleep(0.05)
+
+        mark_done(success=True)
 
     except Exception as fatal:
-        mark_done(
-            success=False,
-            error_msg=f"{type(fatal).__name__}: {fatal}",
-        )
+        mark_done(success=False, error_msg=f"{type(fatal).__name__}: {fatal}")
 
-
-# ── Workflow confirmation ─────────────────────────────────────────────────────
 
 def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
-    """
-    Called from API request thread when user approves or aborts.
-    """
     session = get_session(session_id)
     lock    = _lock_for(session_id)
 
@@ -706,77 +721,39 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
 
     if proceed:
         pending_calls = session.agent_state.pending_tool_calls
-        tool_names    = [tc["function"]["name"] for tc in pending_calls]
-        is_feasibility_only = all(
-            n == "extract_and_check_feasibility" for n in tool_names
+        plan = build_execution_plan_from_tool_calls(session, pending_calls)
+
+        if not plan:
+            with lock:
+                session.pending_plan = None
+                session.agent_state.awaiting_confirmation = False
+                session.agent_state.pending_tool_calls    = []
+            return session
+
+        projected = compute_projected_schedule(
+            plan=plan,
+            current_clock_min=float(session.virtual_clock_minutes),
+            lab_end_min=480.0,
         )
 
-        if is_feasibility_only:
-            with lock:
-                session.agent_state.awaiting_confirmation = False
-                session.agent_state.pending_tool_calls    = []
-                session.equipment_status = EquipmentStatusModel(knowledge=True)
-                session.current_activity = "Checking feasibility..."
+        with lock:
+            session.projected_schedule             = projected
+            session.background_job_plan            = plan
+            session.background_job_index           = 0
+            session.background_job_status          = "running"
+            session.background_job_active          = True
+            session.background_job_label           = "Initialising..."
+            session.background_job_error           = None
+            session.live_event_queue               = []
+            session.agent_state.awaiting_confirmation = False
+            session.agent_state.pending_tool_calls    = []
 
-            for tc in pending_calls:
-                args = {}
-                try:
-                    args = json.loads(tc["function"]["arguments"] or "{}")
-                except Exception:
-                    pass
-                case_name = args.get("case_name", "Case Study")
-
-                session.agent_state.messages.append({
-                    "role":         "tool",
-                    "tool_call_id": tc["id"],
-                    "name":         tc["function"]["name"],
-                    "content":      json.dumps({
-                        "status":    "running",
-                        "case_name": case_name,
-                    }),
-                })
-
-                step = {"kind": "extract_feasibility", "case_name": case_name}
-                try:
-                    execute_plan_step(session, step, query_database)
-                    _sync_condition_key(session)
-                except Exception as e:
-                    session.agent_state.messages.append({
-                        "role":    "assistant",
-                        "content": f"Error during feasibility check: `{e}`",
-                    })
-
-            with lock:
-                session.equipment_status = EquipmentStatusModel()
-                session.current_activity = None
-
-        else:
-            with lock:
-                plan = build_execution_plan_from_tool_calls(
-                    session, pending_calls
-                )
-
-                if not plan:
-                    session.agent_state.awaiting_confirmation = False
-                    session.agent_state.pending_tool_calls    = []
-                    return session
-
-                session.background_job_plan        = plan
-                session.background_job_index       = 0
-                session.background_job_status      = "running"
-                session.background_job_active      = True
-                session.background_job_label       = "Initialising..."
-                session.background_job_error       = None
-                session.live_event_queue           = []
-                session.agent_state.awaiting_confirmation = False
-                session.agent_state.pending_tool_calls    = []
-
-            threading.Thread(
-                target=_run_background_job,
-                args=(session_id,),
-                daemon=True,
-                name=f"maestro-job-{session_id[:8]}",
-            ).start()
+        threading.Thread(
+            target=_run_background_job,
+            args=(session_id,),
+            daemon=True,
+            name=f"maestro-job-{session_id[:8]}",
+        ).start()
 
     else:
         with lock:
@@ -785,14 +762,9 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
                     "role":         "tool",
                     "tool_call_id": tc["id"],
                     "name":         tc["function"]["name"],
-                    "content":      json.dumps({
-                        "status":  "abort",
-                        "message": "User aborted this workflow.",
-                    }),
+                    "content":      json.dumps({"status": "abort", "message": "User aborted."}),
                 })
-            session.agent_state.messages.append({
-                "role": "user", "content": "abort"
-            })
+            session.agent_state.messages.append({"role": "user", "content": "abort"})
             session.agent_state.awaiting_confirmation = False
             session.agent_state.pending_tool_calls    = []
             session.equipment_status.llm              = True
@@ -805,24 +777,17 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
     return session
 
 
-# ── Day management ────────────────────────────────────────────────────────────
-
 def next_day(session_id: str) -> SessionModel:
     session = get_session(session_id)
-    advance_to_next_day(session)
+    session.virtual_day_index    += 1
+    session.virtual_clock_minutes = 0
     return session
 
 
-# ── Artifacts ─────────────────────────────────────────────────────────────────
-
-def register_artifact(
-    session: SessionModel, name: str, kind: str, path: str
-):
+def register_artifact(session: SessionModel, name: str, kind: str, path: str):
     session.artifacts.append(ArtifactModel(name=name, kind=kind, path=path))
     session.artifacts = session.artifacts[-20:]
 
-
-# ── State serialisation ───────────────────────────────────────────────────────
 
 def session_state_payload(session: SessionModel) -> dict:
     results    = session.agent_state.results_store
@@ -830,10 +795,7 @@ def session_state_payload(session: SessionModel) -> dict:
     cond_label = "Conditions"
 
     if session.extracted_campaign:
-        obj_label = (
-            session.extracted_campaign.objective_metric or "Objective"
-        )
-        # Once a campaign is extracted, use the actual condition name
+        obj_label = session.extracted_campaign.objective_metric or "Objective"
         ocs = session.extracted_campaign.operating_conditions
         if ocs:
             cond_label = ocs[0].get("name", "Conditions")
@@ -846,8 +808,6 @@ def session_state_payload(session: SessionModel) -> dict:
         "pending_tool_calls":         session.agent_state.pending_tool_calls,
         "last_tool_result":           session.agent_state.last_tool_result,
         "last_tools_used":            session.agent_state.last_tools_used,
-        "virtual_clock_minutes":      session.virtual_clock_minutes,
-        "virtual_day_index":          session.virtual_day_index,
         "outstanding_tasks":          session.outstanding_tasks,
         "show_plotter_image":         session.show_plotter_image,
         "active_document_id":         session.active_document_id,
@@ -866,19 +826,20 @@ def session_state_payload(session: SessionModel) -> dict:
         "background_job_status":      session.background_job_status,
         "background_job_index":       session.background_job_index,
         "background_job_plan_length": len(session.background_job_plan),
+        "background_job_plan":        session.background_job_plan,
+        "step_statuses":              session.step_statuses,
         "timeline":                   build_dynamic_timeline(session),
         "active_condition_key":       session.active_condition_key,
-        # Phase 3: sample registry
         "sample_registry":            [s.model_dump() for s in session.sample_registry],
-        # Phase 3: pending workflow plan
         "pending_plan":               (
-            session.pending_plan.model_dump()
-            if session.pending_plan else None
+            session.pending_plan.model_dump() if session.pending_plan else None
         ),
+        "optimiser_config":           session.optimiser_config.model_dump(),
+        "projected_schedule":         [e.model_dump() for e in session.projected_schedule],
         "metric_labels": {
             "experiments": "Experiments",
             "best_result": f"Best {obj_label}",
-            "conditions":  f"Operating {cond_label}" if cond_label != "Conditions" else "Operating Conditions",
+            "conditions":  "Conditions Run",
             "failures":    "Failed Steps",
         },
         "resource_log": session.resource_log[-100:],

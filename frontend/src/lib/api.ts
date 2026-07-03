@@ -1,4 +1,7 @@
-import type { SessionState, VirtualInstrument, WorkflowPlan } from "@/types";
+import type {
+  SessionState, VirtualInstrument, WorkflowPlan,
+  LabSettings, DocumentLibraryEntry, OptimisationLibraryEntry,
+} from "@/types";
 
 const BASE = "/api";
 
@@ -46,7 +49,6 @@ export const api = {
       body:   JSON.stringify({ session_id: sessionId }),
     }),
 
-  // ── Phase 3: Execute plan ──────────────────────────────────────────────────
   executePlan: (sessionId: string, plan: WorkflowPlan) =>
     request<{ state: SessionState }>("/execute-plan", {
       method: "POST",
@@ -58,10 +60,7 @@ export const api = {
     const form = new FormData();
     form.append("session_id", sessionId);
     form.append("file", file);
-    const res = await fetch(`${BASE}/documents/upload`, {
-      method: "POST",
-      body:   form,
-    });
+    const res = await fetch(`${BASE}/documents/upload`, { method: "POST", body: form });
     if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
     return res.json();
   },
@@ -75,11 +74,7 @@ export const api = {
       tables:   unknown[];
     }>(`/documents/${documentId}/structure`),
 
-  extractCaseStudy: async (
-    sessionId:  string,
-    documentId: string,
-    caseName:   string,
-  ) => {
+  extractCaseStudy: async (sessionId: string, documentId: string, caseName: string) => {
     const form = new FormData();
     form.append("session_id", sessionId);
     form.append("case_name",  caseName);
@@ -91,7 +86,7 @@ export const api = {
     return res.json();
   },
 
-  // ── Instrument registry ────────────────────────────────────────────────────
+  // ── Instruments ────────────────────────────────────────────────────────────
   listTools: () =>
     request<{ status: string; tools: VirtualInstrument[] }>("/tools"),
 
@@ -120,4 +115,51 @@ export const api = {
     fetch(`${BASE}/export/results-json/${sessionId}`,  { method: "POST" }),
   exportCampaignJson: (sessionId: string) =>
     fetch(`${BASE}/export/campaign-json/${sessionId}`, { method: "POST" }),
+
+  // ── Lab Settings ───────────────────────────────────────────────────────────
+  getLabSettings: () =>
+    request<{ status: string; settings: LabSettings }>("/lab-settings"),
+
+  updateLabSettings: (updates: Partial<LabSettings>) =>
+    request<{ status: string; settings: LabSettings }>("/lab-settings", {
+      method: "PUT",
+      body:   JSON.stringify(updates),
+    }),
+
+  // ── Document Library ───────────────────────────────────────────────────────
+  listLibrary: () =>
+    request<{ status: string; documents: DocumentLibraryEntry[] }>("/library"),
+
+  removeFromLibrary: (documentId: string) =>
+    request<{ status: string }>(`/library/${documentId}`, { method: "DELETE" }),
+
+  // ── Optimisation Library ───────────────────────────────────────────────────
+  listOptimisationLibrary: () =>
+    request<{ status: string; libraries: OptimisationLibraryEntry[] }>("/optimisation-library"),
+
+  addToOptimisationLibrary: (entry: Partial<OptimisationLibraryEntry>) =>
+    request<{ status: string; entry: OptimisationLibraryEntry }>("/optimisation-library", {
+      method: "POST",
+      body:   JSON.stringify(entry),
+    }),
+
+  removeFromOptimisationLibrary: (libId: string) =>
+    request<{ status: string }>(`/optimisation-library/${libId}`, { method: "DELETE" }),
+
+  // ── Optimiser config ───────────────────────────────────────────────────────
+  updateSessionOptimiser: (
+    sessionId:       string,
+    name:            string,
+    nCalls:          number,
+    nInitialPoints:  number,
+  ) =>
+    request<{ state: SessionState }>("/optimiser", {
+      method: "POST",
+      body:   JSON.stringify({
+        session_id:       sessionId,
+        name,
+        n_calls:          nCalls,
+        n_initial_points: nInitialPoints,
+      }),
+    }),
 };

@@ -1,72 +1,66 @@
 import { create } from "zustand";
-import type { SessionState, WsEvent, WorkflowPlan } from "@/types";
+import type { SessionState, WsEvent, WorkflowPlan, LabSettings, OptimisationLibraryEntry } from "@/types";
 import { api } from "@/lib/api";
 
-type Theme = "light" | "dark";
-
 interface MaestroStore {
-  // Session
   sessionId:   string | null;
   state:       SessionState | null;
   isLoading:   boolean;
   error:       string | null;
-
-  // WebSocket
   wsConnected: boolean;
   liveEvents:  WsEvent[];
   lastEvent:   WsEvent | null;
-
-  // UI
   sidebarOpen: boolean;
-  theme:       Theme;
+  labSettings: LabSettings | null;
+  optimisationLibrary: OptimisationLibraryEntry[];
 
-  // Actions
-  initSession:    () => Promise<void>;
-  refreshState:   () => Promise<void>;
-  sendMessage:    (text: string) => Promise<void>;
-  confirm:        (proceed: boolean) => Promise<void>;
-  executePlan:    (plan: WorkflowPlan) => Promise<void>;
-  nextDay:        () => Promise<void>;
-  reset:          () => Promise<void>;
-  pushWsEvent:    (event: WsEvent) => void;
-  setWsConnected: (v: boolean) => void;
-  setSidebarOpen: (v: boolean) => void;
-  setTheme:       (t: Theme) => void;
-  toggleTheme:    () => void;
-  clearError:     () => void;
+  initSession:              () => Promise<void>;
+  refreshState:             () => Promise<void>;
+  sendMessage:              (text: string) => Promise<void>;
+  confirm:                  (proceed: boolean) => Promise<void>;
+  executePlan:              (plan: WorkflowPlan) => Promise<void>;
+  nextDay:                  () => Promise<void>;
+  reset:                    () => Promise<void>;
+  pushWsEvent:              (event: WsEvent) => void;
+  setWsConnected:           (v: boolean) => void;
+  setSidebarOpen:           (v: boolean) => void;
+  clearError:               () => void;
+  loadLabSettings:          () => Promise<void>;
+  saveLabSettings:          (updates: Partial<LabSettings>) => Promise<void>;
+  loadOptimisationLibrary:  () => Promise<void>;
+  updateOptimiser:          (name: string, nCalls: number, nInitPts: number) => Promise<void>;
 }
 
 export const useMaestroStore = create<MaestroStore>((set, get) => ({
-  sessionId:   null,
-  state:       null,
-  isLoading:   false,
-  error:       null,
-  wsConnected: false,
-  liveEvents:  [],
-  lastEvent:   null,
-  sidebarOpen: true,
-  theme:       "light",   // ← light mode default
+  sessionId:           null,
+  state:               null,
+  isLoading:           false,
+  error:               null,
+  wsConnected:         false,
+  liveEvents:          [],
+  lastEvent:           null,
+  sidebarOpen:         true,
+  labSettings:         null,
+  optimisationLibrary: [],
 
   initSession: async () => {
     set({ isLoading: true, error: null });
     try {
-      const stored    = sessionStorage.getItem("maestro_session_id");
+      const stored    = localStorage.getItem("maestro_session_id");
       let   sessionId = stored;
-
       if (sessionId) {
         try {
           const res = await api.getState(sessionId);
           set({ sessionId, state: res.state, isLoading: false });
           return;
         } catch {
-          sessionStorage.removeItem("maestro_session_id");
+          localStorage.removeItem("maestro_session_id");
           sessionId = null;
         }
       }
-
       const created  = await api.createSession();
       sessionId      = created.session_id;
-      sessionStorage.setItem("maestro_session_id", sessionId);
+      localStorage.setItem("maestro_session_id", sessionId);
       const stateRes = await api.getState(sessionId);
       set({ sessionId, state: stateRes.state, isLoading: false });
     } catch (e) {
@@ -93,7 +87,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     }
   },
 
-  sendMessage: async (text: string) => {
+  sendMessage: async (text) => {
     const { sessionId } = get();
     if (!sessionId) return;
     set({ isLoading: true });
@@ -105,7 +99,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     }
   },
 
-  confirm: async (proceed: boolean) => {
+  confirm: async (proceed) => {
     const { sessionId } = get();
     if (!sessionId) return;
     set({ isLoading: true });
@@ -117,7 +111,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     }
   },
 
-  executePlan: async (plan: WorkflowPlan) => {
+  executePlan: async (plan) => {
     const { sessionId } = get();
     if (!sessionId) return;
     set({ isLoading: true });
@@ -137,9 +131,9 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
   },
 
   reset: async () => {
-    sessionStorage.removeItem("maestro_session_id");
+    localStorage.removeItem("maestro_session_id");
     const created  = await api.createSession();
-    sessionStorage.setItem("maestro_session_id", created.session_id);
+    localStorage.setItem("maestro_session_id", created.session_id);
     const stateRes = await api.getState(created.session_id);
     set({
       sessionId:  created.session_id,
@@ -150,7 +144,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     });
   },
 
-  pushWsEvent: (event: WsEvent) =>
+  pushWsEvent: (event) =>
     set((s) => ({
       liveEvents: [...s.liveEvents.slice(-49), event],
       lastEvent:  event,
@@ -158,7 +152,43 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
 
   setWsConnected: (v) => set({ wsConnected: v }),
   setSidebarOpen: (v) => set({ sidebarOpen: v }),
-  setTheme:       (t) => set({ theme: t }),
-  toggleTheme:    ()  => set((s) => ({ theme: s.theme === "light" ? "dark" : "light" })),
   clearError:     ()  => set({ error: null }),
+
+  loadLabSettings: async () => {
+    try {
+      const res = await api.getLabSettings();
+      set({ labSettings: res.settings });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  saveLabSettings: async (updates) => {
+    try {
+      const res = await api.updateLabSettings(updates);
+      set({ labSettings: res.settings });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  loadOptimisationLibrary: async () => {
+    try {
+      const res = await api.listOptimisationLibrary();
+      set({ optimisationLibrary: res.libraries });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  updateOptimiser: async (name, nCalls, nInitPts) => {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    try {
+      const res = await api.updateSessionOptimiser(sessionId, name, nCalls, nInitPts);
+      set({ state: res.state });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
 }));

@@ -1,85 +1,94 @@
 """
-SQLite database for storing experimental evaluations.
+Persistent store for experimental evaluations.
 
-Why SQLite?
-- Zero config, single file, perfect for a research prototype
-- The agent can query it with SQL via the query_database tool
-- Easy to inspect with DB Browser for SQLite
+Schema uses a generic design: condition_name/condition_value capture the
+primary operating condition, and a JSON 'parameters' column stores all
+free parameters. This makes the schema instrument-agnostic.
 """
+import json
 import sqlite3
+from typing import Any, Dict, List, Optional
+
 from app.core.config import DB_PATH
 
-# Schema description injected into the LLM system prompt
-# so the agent knows what it can query
 DB_SCHEMA = (
     "Table: evaluations\n"
     "Columns:\n"
-    "  id              INTEGER — auto-increment primary key\n"
-    "  power_W         REAL    — discharge power in watts\n"
-    "  active_material REAL    — active material wt%\n"
-    "  porosity        REAL    — porosity %\n"
-    "  specific_energy REAL    — measured specific energy (Wh/kg)\n"
-    "  timestamp       TEXT    — lab clock time (HH:MM)\n"
+    "  id               INTEGER — auto-increment primary key\n"
+    "  condition_name   TEXT    — name of the operating condition (e.g. 'power_W')\n"
+    "  condition_value  REAL    — value of the operating condition\n"
+    "  parameters       TEXT    — JSON object of free parameter name→value pairs\n"
+    "  objective_name   TEXT    — name of the measured objective (e.g. 'specific_energy')\n"
+    "  objective_value  REAL    — measured objective value\n"
+    "  timestamp        TEXT    — ISO timestamp of the measurement\n"
 )
 
 
-def init_db():
-    """Drop and recreate the evaluations table (used on reset)."""
+def init_db() -> None:
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     cur.execute("DROP TABLE IF EXISTS evaluations")
     cur.execute("""
         CREATE TABLE evaluations (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            power_W         REAL NOT NULL,
-            active_material REAL NOT NULL,
-            porosity        REAL NOT NULL,
-            specific_energy REAL NOT NULL,
-            timestamp       TEXT NOT NULL
+            condition_name  TEXT    NOT NULL,
+            condition_value REAL    NOT NULL,
+            parameters      TEXT    NOT NULL DEFAULT '{}',
+            objective_name  TEXT    NOT NULL,
+            objective_value REAL    NOT NULL,
+            timestamp       TEXT    NOT NULL
         )
     """)
     con.commit()
     con.close()
 
 
-def ensure_db():
-    """Create the table if it doesn't exist (used on startup)."""
+def ensure_db() -> None:
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS evaluations (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            power_W         REAL NOT NULL,
-            active_material REAL NOT NULL,
-            porosity        REAL NOT NULL,
-            specific_energy REAL NOT NULL,
-            timestamp       TEXT NOT NULL
+            condition_name  TEXT    NOT NULL,
+            condition_value REAL    NOT NULL,
+            parameters      TEXT    NOT NULL DEFAULT '{}',
+            objective_name  TEXT    NOT NULL,
+            objective_value REAL    NOT NULL,
+            timestamp       TEXT    NOT NULL
         )
     """)
     con.commit()
     con.close()
 
 
-def write_evaluation(power_W: float, am: float, por: float,
-                     energy: float, timestamp: str):
-    """Write one successful experiment result to the database."""
+def write_evaluation(
+    condition_name:  str,
+    condition_value: float,
+    parameters:      Dict[str, float],
+    objective_name:  str,
+    objective_value: float,
+    timestamp:       str,
+) -> None:
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     cur.execute(
-        "INSERT INTO evaluations (power_W, active_material, porosity, specific_energy, timestamp) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (power_W, am, por, energy, timestamp),
+        "INSERT INTO evaluations "
+        "(condition_name, condition_value, parameters, objective_name, objective_value, timestamp) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            condition_name,
+            condition_value,
+            json.dumps(parameters),
+            objective_name,
+            objective_value,
+            timestamp,
+        ),
     )
     con.commit()
     con.close()
 
 
 def query_database(sql: str, max_rows: int = 100) -> dict:
-    """
-    Execute a read-only SELECT query.
-    The agent calls this tool to answer questions like
-    'what was the best result at 150W?'
-    """
     sql = sql.strip()
     if not sql.upper().startswith("SELECT"):
         return {"status": "error", "message": "Only SELECT statements are permitted."}
@@ -92,9 +101,14 @@ def query_database(sql: str, max_rows: int = 100) -> dict:
         cur = con.cursor()
         cur.execute(sql)
         columns = [d[0] for d in cur.description] if cur.description else []
-        rows     = cur.fetchall()
+        rows    = cur.fetchall()
         con.close()
-        return {"status": "ok", "columns": columns, "rows": [list(r) for r in rows], "n_rows": len(rows)}
+        return {
+            "status":  "ok",
+            "columns": columns,
+            "rows":    [list(r) for r in rows],
+            "n_rows":  len(rows),
+        }
     except sqlite3.OperationalError as e:
         return {"status": "error", "message": f"Database error: {e}"}
     except Exception as e:

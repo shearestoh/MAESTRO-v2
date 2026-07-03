@@ -1,18 +1,16 @@
-"""
-FastAPI application entry point.
-Intentionally thin — wires router, WebSocket, and startup hooks.
-"""
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.api.websocket import websocket_endpoint
-from app.core.tool_registry import register_default_tools
+from app.core.tool_registry import register_default_instruments
+from app.core.lab_config import load_lab_settings, load_library_documents_into_store
+from app.core.database import ensure_db
 
 app = FastAPI(
-    title="MAESTRO v3 API",
-    description="Domain-agnostic agentic scientific orchestration",
-    version="3.0.0",
+    title="MAESTRO API",
+    description="Materials Acceleration Engine for Synthesis, Testing and Orchestration",
+    version="1.0.0",
 )
 
 app.add_middleware(
@@ -26,8 +24,16 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup():
-    """Register default virtual tools on startup."""
-    register_default_tools()
+    settings = load_lab_settings()
+    print(f"[INFO] Lab: {settings.lab_name}")
+    ensure_db()
+    register_default_instruments()
+    load_library_documents_into_store()
+    try:
+        import mineru
+        print("[INFO] MinerU available")
+    except ImportError:
+        print("[WARN] MinerU not installed. Install with: pip install mineru")
 
 
 app.include_router(router)
