@@ -309,6 +309,18 @@ function WorkflowPlanEditor({
     "focus:outline-none focus:border-blue-400 transition-colors",
   );
 
+  const hasInvalidBoSteps = editedPlan.steps.some(
+    (s) =>
+      s.kind === "optimise_condition" &&
+      (
+        !s.condition_label ||
+        s.condition_label === "condition" ||
+        s.condition_value === undefined ||
+        s.condition_value === null ||
+        (s.free_params ?? []).length === 0
+      )
+  );
+
   return (
     <div className="glass-panel border border-blue-200 p-4 space-y-4 animate-slide-up">
       <div className="flex items-start justify-between">
@@ -409,20 +421,39 @@ function WorkflowPlanEditor({
                 {step.kind === "optimise_condition" && (
                   <div className="space-y-3">
                     <div className="space-y-2">
-                      <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Condition</div>
+                      <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+                        Fixed operating condition
+                      </div>
                       <div className="flex items-center gap-2">
-                        <label className="text-xs text-slate-500 w-32 shrink-0">
-                          {step.condition_label ?? "condition"}
-                        </label>
+                        <input
+                          type="text"
+                          value={step.condition_label ?? ""}
+                          onChange={(e) => updateStep(step.step_id, "condition_label", e.target.value)}
+                          className={cn(inputCls, "w-28")}
+                          placeholder="e.g. power_W"
+                        />
+                        <span className="text-xs text-slate-400">=</span>
                         <input
                           type="number"
-                          value={step.condition_value ?? 0}
-                          onChange={(e) => updateStep(step.step_id, "condition_value", parseFloat(e.target.value))}
-                          className={inputCls}
-                          step="1"
+                          value={step.condition_value ?? ""}
+                          onChange={(e) => updateStep(step.step_id, "condition_value", parseFloat(e.target.value) || 0)}
+                          className={cn(inputCls, "w-24")}
+                          placeholder="e.g. 90"
+                          step="any"
                         />
-                        <span className="text-xs text-slate-400">{step.condition_unit}</span>
+                        <input
+                          type="text"
+                          value={step.condition_unit ?? ""}
+                          onChange={(e) => updateStep(step.step_id, "condition_unit", e.target.value)}
+                          className={cn(inputCls, "w-16")}
+                          placeholder="unit"
+                        />
                       </div>
+                      {(!step.condition_label || step.condition_label === "condition" || !step.condition_value) && (
+                        <p className="text-[10px] text-amber-600">
+                          Set the operating condition name and value above (e.g. power_W = 90).
+                        </p>
+                      )}
                     </div>
 
                     {step.free_params && step.free_params.length > 0 && (
@@ -451,6 +482,12 @@ function WorkflowPlanEditor({
                             <span className="text-xs text-slate-400">{p.unit}</span>
                           </div>
                         ))}
+                      </div>
+                    )}
+
+                    {step.free_params && step.free_params.length === 0 && (
+                      <div className="text-[10px] text-amber-600">
+                        No free parameters defined. Describe the parameters to optimise in the chat.
                       </div>
                     )}
 
@@ -499,10 +536,23 @@ function WorkflowPlanEditor({
         Edit fields above or describe changes in the chat.
       </div>
 
+      {hasInvalidBoSteps && (
+        <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded p-2">
+          ⚠️ Complete the operating condition (name + value) and free parameters for all BO steps before approving.
+        </p>
+      )}
+
       <div className="flex gap-2 pt-1">
         <button
           onClick={() => onApprove(editedPlan)}
-          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-medium hover:bg-green-500 transition-colors"
+          disabled={hasInvalidBoSteps}
+          title={hasInvalidBoSteps ? "Complete all BO step fields before approving" : undefined}
+          className={cn(
+            "flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-colors",
+            hasInvalidBoSteps
+              ? "bg-slate-200 text-slate-400 cursor-not-allowed"
+              : "bg-green-600 text-white hover:bg-green-500",
+          )}
         >
           <CheckCircle2 size={14} /> Approve & Run
         </button>

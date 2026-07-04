@@ -77,11 +77,7 @@ class OptimisationLibraryEntry(BaseModel):
 class LabSettings(BaseModel):
     lab_name:                str   = "My Lab"
     lab_description:         str   = ""
-    institution:             str   = ""
     system_prompt_extension: str   = ""
-    default_n_calls:          int  = 20
-    default_n_initial_points: int  = 6
-    default_optimiser:        str  = "gp_bo"
     document_library:         List[DocumentLibraryEntry]     = Field(default_factory=list)
     optimisation_library:     List[OptimisationLibraryEntry] = Field(default_factory=list)
 
@@ -97,12 +93,13 @@ class OptimiserConfig(BaseModel):
 # ── Projected Schedule ────────────────────────────────────────────────────────
 
 class ProjectedScheduleEntry(BaseModel):
-    instrument_id: str
-    start_min:     float
-    end_min:       float
-    step_id:       str
-    label:         str
-    is_projected:  bool = True
+    instrument_id:   str
+    instrument_name: str = ""
+    start_time:      str = ""
+    end_time:        str = ""
+    step_id:         str
+    label:           str
+    is_projected:    bool = True
 
 
 # ── Sample Registry ───────────────────────────────────────────────────────────
@@ -145,8 +142,8 @@ class WorkflowStep(BaseModel):
     status:        str = "pending"
     start_time:    Optional[str] = None
     end_time:      Optional[str] = None
-    projected_start_min: Optional[float] = None
-    projected_end_min:   Optional[float] = None
+    projected_start_time: Optional[str] = None
+    projected_end_time:   Optional[str] = None
     params:          Dict[str, float] = Field(default_factory=dict)
     produces:        Optional[str] = None
     sample_ref:      Optional[str] = None

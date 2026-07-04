@@ -60,7 +60,6 @@ export interface SampleResult {
   conditions: Record<string, number>;
   outputs:    Record<string, number>;
   tested_at:  string;
-  tested_day: number;
   notes:      string;
 }
 
@@ -70,7 +69,6 @@ export interface Sample {
   prepared_by:    string;
   status:         "prepared" | "tested" | "failed" | "stored";
   prepared_at:    string;
-  prepared_day:   number;
   failure_reason: string | null;
   notes:          string;
   results:        SampleResult[];
@@ -96,10 +94,10 @@ export interface WorkflowStep {
   instrument_id?:   string;
   dependencies:     string[];
   status:           StepStatus;
-  start_time?:      number;
-  end_time?:        number;
-  projected_start_min?: number;
-  projected_end_min?:   number;
+  start_time?:      string;
+  end_time?:        string;
+  projected_start_time?: string;
+  projected_end_time?:   string;
   params?:          Record<string, number>;
   produces?:        string;
   sample_ref?:      string;
@@ -130,12 +128,13 @@ export interface WorkflowPlan {
 // ── Projected Schedule ────────────────────────────────────────────────────────
 
 export interface ProjectedScheduleEntry {
-  instrument_id: string;
-  start_min:     number;
-  end_min:       number;
-  step_id:       string;
-  label:         string;
-  is_projected:  boolean;
+  instrument_id:   string;
+  instrument_name: string;
+  start_time:      string;
+  end_time:        string;
+  step_id:         string;
+  label:           string;
+  is_projected:    boolean;
 }
 
 // ── Results ───────────────────────────────────────────────────────────────────
@@ -314,7 +313,6 @@ export interface DocumentLibraryEntry {
   title:       string | null;
   summary:     string | null;
   uploaded_at: string;
-  mineru_used: boolean;
   file_path:   string;
   doc_type:    DocumentType;
 }
@@ -333,19 +331,7 @@ export interface OptimisationLibraryEntry {
 export interface LabSettings {
   lab_name:                string;
   lab_description:         string;
-  institution:             string;
   system_prompt_extension: string;
-  lab_start_hour:          number;
-  lab_start_minute:        number;
-  lab_end_hour:            number;
-  lab_end_minute:          number;
-  virtual_min_sampler:     number;
-  virtual_min_tester:      number;
-  sampler_base_fail_prob:  number;
-  tester_noise_sigma:      number;
-  default_n_calls:         number;
-  default_n_initial_points:number;
-  default_optimiser:       string;
   document_library:        DocumentLibraryEntry[];
   optimisation_library:    OptimisationLibraryEntry[];
 }

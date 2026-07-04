@@ -224,7 +224,7 @@ function InstrumentRow({
       </div>
       <div className="flex items-center gap-2 shrink-0">
         {instrument.time_cost_min > 0 && (
-          <span className="text-[10px] text-slate-400">{instrument.time_cost_min}min</span>
+          <span className="text-[10px] text-slate-400">{instrument.time_cost_min}s</span>
         )}
         <button onClick={onEdit} className="text-xs text-slate-400 hover:text-blue-600 transition-colors px-2 py-1">
           Edit
@@ -410,7 +410,7 @@ function InstrumentForm({
 
       <div className="grid grid-cols-3 gap-3">
         <div>
-          <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">Time cost (min)</label>
+          <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">Time cost (s)</label>
           <input className={inputCls} type="number" value={timeCost} onChange={(e) => setTimeCost(e.target.value)} min="0" />
         </div>
         <div>
@@ -446,18 +446,9 @@ function InstrumentForm({
 // ── Optimisation Tab ──────────────────────────────────────────────────────────
 
 function OptimisationTab() {
-  const sessionId             = useMaestroStore((s) => s.sessionId);
-  const state                 = useMaestroStore((s) => s.state);
-  const optimisationLibrary   = useMaestroStore((s) => s.optimisationLibrary);
+  const optimisationLibrary     = useMaestroStore((s) => s.optimisationLibrary);
   const loadOptimisationLibrary = useMaestroStore((s) => s.loadOptimisationLibrary);
-  const updateOptimiser       = useMaestroStore((s) => s.updateOptimiser);
 
-  const current = state?.optimiser_config;
-
-  const [nCalls,   setNCalls]   = useState(String(current?.n_calls ?? 20));
-  const [nInitPts, setNInitPts] = useState(String(current?.n_initial_points ?? 6));
-  const [saving,   setSaving]   = useState(false);
-  const [saved,    setSaved]    = useState(false);
   const [showAdd,  setShowAdd]  = useState(false);
   const [newEntry, setNewEntry] = useState<Partial<OptimisationLibraryEntry>>({
     name: "", description: "", capabilities: [], install_cmd: "", docs_url: "",
@@ -466,21 +457,6 @@ function OptimisationTab() {
   useEffect(() => {
     if (optimisationLibrary.length === 0) loadOptimisationLibrary();
   }, [optimisationLibrary.length, loadOptimisationLibrary]);
-
-  useEffect(() => {
-    if (current) {
-      setNCalls(String(current.n_calls));
-      setNInitPts(String(current.n_initial_points));
-    }
-  }, [current]);
-
-  const handleSaveDefaults = async () => {
-    setSaving(true);
-    await updateOptimiser(current?.name ?? "gp_bo", parseInt(nCalls), parseInt(nInitPts));
-    setSaving(false);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-  };
 
   const handleAddEntry = async () => {
     if (!newEntry.name?.trim()) return;
@@ -511,12 +487,12 @@ function OptimisationTab() {
 
   return (
     <div className="space-y-6 max-w-3xl">
-
       <div>
-        <h3 className="text-sm font-semibold text-slate-700 mb-1">Optimisation Library</h3>
+        <h3 className="text-sm font-semibold text-slate-700 mb-1">Optimisation library</h3>
         <p className="text-xs text-slate-500 mb-4">
-          MAESTRO reads these library descriptions and selects the most appropriate
-          algorithm for each task. Add, remove, or annotate libraries to guide the agent.
+          MAESTRO reads these descriptions and selects the most appropriate algorithm
+          for each task, including proposing suitable hyperparameters. Add or remove
+          libraries to guide the agent's choices.
         </p>
         <div className="space-y-3">
           {optimisationLibrary.map((lib) => (
@@ -582,7 +558,7 @@ function OptimisationTab() {
 
         {showAdd && (
           <div className="glass-panel p-4 mt-3 space-y-3 border-blue-200 border">
-            <h4 className="text-xs font-semibold text-slate-700">Add Optimisation Library</h4>
+            <h4 className="text-sm font-semibold text-slate-700">Add optimisation library</h4>
             <input
               className={cn(inputCls, "w-full")}
               placeholder="Library name (e.g. BoTorch)"
@@ -624,38 +600,6 @@ function OptimisationTab() {
               </button>
             </div>
           </div>
-        )}
-      </div>
-
-      <div className="glass-panel p-4 space-y-3 border-t border-slate-200">
-        <h4 className="text-xs font-semibold text-slate-600 uppercase tracking-wider">
-          Session Defaults
-        </h4>
-        <p className="text-xs text-slate-500">
-          Default iteration counts applied when the agent runs a BO campaign.
-        </p>
-        <div className="flex items-center gap-4">
-          <div>
-            <label className="text-[10px] text-slate-500 block mb-1">Iterations per campaign</label>
-            <input type="number" className={cn(inputCls, "w-24")} value={nCalls} onChange={(e) => setNCalls(e.target.value)} min="1" max="200" />
-          </div>
-          <div>
-            <label className="text-[10px] text-slate-500 block mb-1">Initial random points</label>
-            <input type="number" className={cn(inputCls, "w-24")} value={nInitPts} onChange={(e) => setNInitPts(e.target.value)} min="1" max="50" />
-          </div>
-        </div>
-        <button
-          onClick={handleSaveDefaults}
-          disabled={saving || !sessionId}
-          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors disabled:opacity-50"
-        >
-          {saving ? <Loader2 size={12} className="animate-spin" /> :
-           saved  ? <CheckCircle2 size={12} /> :
-                    <Save size={12} />}
-          {saving ? "Saving..." : saved ? "Saved!" : "Apply to Session"}
-        </button>
-        {!sessionId && (
-          <p className="text-xs text-amber-600">Start a session on the Dashboard first.</p>
         )}
       </div>
     </div>
@@ -838,6 +782,9 @@ function SettingsTab() {
     "focus:outline-none focus:border-blue-400",
   );
 
+  // Consistent section header style matching all other tabs
+  const sectionHeaderCls = "text-sm font-semibold text-slate-700";
+
   if (!labSettings) {
     return (
       <div className="flex items-center gap-2 text-slate-400">
@@ -851,7 +798,7 @@ function SettingsTab() {
     <div className="space-y-6 max-w-2xl">
 
       <div className="glass-panel p-4 space-y-3">
-        <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Lab Identity</h3>
+        <h3 className={sectionHeaderCls}>Lab identity</h3>
         <div>
           <label className="text-[10px] text-slate-500 block mb-1">Lab name</label>
           <input
@@ -868,20 +815,10 @@ function SettingsTab() {
             onChange={(e) => update("lab_description", e.target.value)}
           />
         </div>
-        <div>
-          <label className="text-[10px] text-slate-500 block mb-1">Institution</label>
-          <input
-            className={inputCls}
-            value={form.institution ?? ""}
-            onChange={(e) => update("institution", e.target.value)}
-          />
-        </div>
       </div>
 
       <div className="glass-panel p-4 space-y-3">
-        <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wider">
-          Agent Context
-        </h3>
+        <h3 className={sectionHeaderCls}>Agent context</h3>
         <p className="text-xs text-slate-500">
           This text is injected into MAESTRO's system prompt. Describe your lab's
           domain, research goals, safety constraints, or resource limits.
@@ -914,7 +851,7 @@ function SettingsTab() {
         {saving ? <Loader2 size={12} className="animate-spin" /> :
          saved  ? <CheckCircle2 size={12} /> :
                   <Save size={12} />}
-        {saving ? "Saving..." : saved ? "Saved!" : "Save Settings"}
+        {saving ? "Saving..." : saved ? "Saved!" : "Save settings"}
       </button>
     </div>
   );

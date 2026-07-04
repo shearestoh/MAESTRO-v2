@@ -28,7 +28,6 @@ from app.core.models import (
     ProjectedScheduleEntry,
     Sample,
     SampleResult,
-    WorkflowStep,
     generate_sample_id,
     make_result_entry,
 )
@@ -86,11 +85,6 @@ def _get_instrument_time_cost(instrument_name: str) -> float:
 
 
 def _is_virtual_instrument(instrument_name: str) -> bool:
-    """
-    Returns True if the instrument uses a simulation adapter (virtual).
-    Virtual instruments get an artificial delay to mimic real lab timing.
-    Real instruments execute without delay — their actual operation provides the timing.
-    """
     from app.core.tool_registry import TOOL_REGISTRY
     inst = TOOL_REGISTRY.get_by_name(instrument_name)
     if inst and inst.adapter:
@@ -98,13 +92,9 @@ def _is_virtual_instrument(instrument_name: str) -> bool:
     return False
 
 
-def _apply_instrument_delay(instrument_name: str, time_cost_min: float) -> None:
-    """
-    For virtual instruments: sleep for time_cost_min seconds to simulate operation.
-    For real instruments: no artificial delay — actual execution provides the timing.
-    """
-    if time_cost_min > 0 and _is_virtual_instrument(instrument_name):
-        _time.sleep(time_cost_min)
+def _apply_instrument_delay(instrument_name: str, time_cost_seconds: float) -> None:
+    if time_cost_seconds > 0 and _is_virtual_instrument(instrument_name):
+        _time.sleep(time_cost_seconds)
 
 
 # ── Results store helpers ─────────────────────────────────────────────────────
@@ -125,9 +115,9 @@ def get_or_create_result_for_condition(
     return entry
 
 
-def _log_resource(session, instrument: str, start_time: str, end_time: str):
+def _log_resource(session, instrument_name: str, start_time: str, end_time: str):
     session.resource_log.append({
-        "instrument": instrument,
+        "instrument": instrument_name,
         "start_time": start_time,
         "end_time":   end_time,
     })
@@ -150,54 +140,67 @@ def _now() -> str:
 # ── Projected Schedule ────────────────────────────────────────────────────────
 
 def compute_projected_schedule(
-    plan:              List[dict],
-    current_clock_min: float,
-    lab_end_min:       float = 480.0,
+    plan: List[dict],
 ) -> List[ProjectedScheduleEntry]:
+    """
+    Compute projected start/end times for each step using real wall-clock time.
+    Steps are scheduled sequentially from now, respecting instrument availability.
+    """
     from app.core.tool_registry import INSTRUMENT_REGISTRY
+    from datetime import datetime, timedelta
 
-    step_end:        Dict[str, float] = {}
-    instrument_free: Dict[str, float] = {}
+    now = datetime.utcnow()
+    step_end:        Dict[str, datetime] = {}
+    instrument_free: Dict[str, datetime] = {}
     entries:         List[ProjectedScheduleEntry] = []
 
-    def get_duration(step: dict) -> float:
-        kind          = step.get("kind", "")
+    def get_duration_seconds(step: dict) -> float:
         instrument_nm = step.get("instrument", "")
         if instrument_nm:
             cost = INSTRUMENT_REGISTRY.get_time_cost(instrument_nm, default=-1)
             if cost >= 0:
                 return cost
+        kind = step.get("kind", "")
         if kind in ("prepare_sample", "test_sample", "optimise_condition"):
             return 5.0
         return 0.0
 
     for step in plan:
         step_id = step.get("step_id") or ""
-        raw_instrument_id = step.get("instrument_id") or step.get("instrument") or step.get("kind") or "unknown"
-        instrument_id = str(raw_instrument_id) if raw_instrument_id is not None else "unknown"
-
-        dependencies = step.get("dependencies", [])
-        duration     = get_duration(step)
+        raw_instrument_id = (
+            step.get("instrument_id")
+            or step.get("instrument")
+            or step.get("kind")
+            or "unknown"
+        )
+        instrument_id   = str(raw_instrument_id) if raw_instrument_id is not None else "unknown"
+        raw_instrument_name = step.get("instrument") or step.get("label") or instrument_id
+        instrument_name = str(raw_instrument_name) if raw_instrument_name is not None else instrument_id
+        dependencies    = step.get("dependencies", [])
+        duration_s      = get_duration_seconds(step)
 
         dep_end   = max(
-            (step_end.get(dep_id, current_clock_min) for dep_id in dependencies),
-            default=current_clock_min,
+            (step_end.get(dep_id, now) for dep_id in dependencies),
+            default=now,
         )
-        inst_free  = instrument_free.get(instrument_id, current_clock_min)
-        proj_start = max(dep_end, inst_free, current_clock_min)
-        proj_end   = proj_start + duration
+        inst_free  = instrument_free.get(instrument_id, now)
+        proj_start = max(dep_end, inst_free, now)
+        proj_end   = proj_start + timedelta(seconds=duration_s)
 
         step_end[step_id]              = proj_end
         instrument_free[instrument_id] = proj_end
 
-        step["projected_start_min"] = proj_start
-        step["projected_end_min"]   = proj_end
+        step["projected_start_time"] = proj_start.isoformat()
+        step["projected_end_time"]   = proj_end.isoformat()
 
-        if duration > 0 and instrument_id not in ("optimiser", "memory", "reporting", "knowledge", "unknown", ""):
+        if duration_s > 0 and instrument_id not in (
+            "optimiser", "memory", "reporting", "knowledge", "unknown", ""
+        ):
             entries.append(ProjectedScheduleEntry(
                 instrument_id=instrument_id,
-                start_min=proj_start,
-                end_min=proj_end,
+                instrument_name=instrument_name,
+                start_time=proj_start.isoformat(),
+                end_time=proj_end.isoformat(),
                 step_id=step_id,
                 label=step.get("label", step.get("kind", "")),
                 is_projected=True,
@@ -342,7 +345,7 @@ def prepare_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[st
     ))
 
     start_time = _now()
-    _apply_instrument_delay(instrument, time_cost)  
+    _apply_instrument_delay(instrument, time_cost)
     result    = _execute_preparation(instrument, params)
     end_time  = _now()
     _log_resource(session, instrument, start_time, end_time)
@@ -389,9 +392,8 @@ def prepare_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[st
     session.agent_state.messages.append({
         "role":    "assistant",
         "content": (
-            f"✅ **Sample prepared:** `{sample_id}`\n\n"
-            f"| Parameter | Value |\n|-----------|-------|\n"
-            + "\n".join(f"| {k} | {v} |" for k, v in params.items())
+            f"✅ **Sample `{sample_id}` prepared**\n\n"
+            + "\n".join(f"- **{k}:** {v}" for k, v in params.items())
             + f"\n\nStored in lab inventory."
         ),
     })
@@ -434,12 +436,11 @@ def test_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, 
     ))
 
     start_time = _now()
-    _apply_instrument_delay(instrument, time_cost)  # sleep happens here
+    _apply_instrument_delay(instrument, time_cost)
     value     = _execute_measurement(instrument, sample.params, conditions)
     end_time  = _now()
     _log_resource(session, instrument, start_time, end_time)
 
-    value     = _execute_measurement(instrument, sample.params, conditions)
     timestamp = _now()
 
     result = SampleResult(
@@ -476,13 +477,13 @@ def test_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, 
         category="analysis",
         payload={},
     ))
+    cond_str = ", ".join(f"{k} = {v}" for k, v in conditions.items()) if conditions else "no conditions set"
     session.agent_state.messages.append({
         "role":    "assistant",
         "content": (
-            f"⚡ **Test result for `{sample_ref}`:**\n\n"
-            f"| | |\n|---|---|\n"
-            + "\n".join(f"| {k} | {v} |" for k, v in conditions.items())
-            + f"\n| **{measures}** | **{value:.4f}** |"
+            f"⚡ **`{sample_ref}` tested**"
+            + (f" ({cond_str})" if conditions else "")
+            + f"\n\n**{measures}:** {value:.4f}"
         ),
     })
     return {"status": "ok", "sample_id": sample_ref, "conditions": conditions, "outputs": {measures: value}}
@@ -519,13 +520,34 @@ def expand_optimise_condition_to_events(
     step:          dict,
     results_store: List[dict],
 ) -> List[ExecutionEvent]:
-    condition_label  = step["condition_label"]
-    condition_value  = float(step["condition_value"])
-    free_params      = step["free_params"]
-    objective_metric = step.get("objective_metric", "objective")
-    n_calls          = int(step.get("n_calls", session.optimiser_config.n_calls))
-    n_init           = int(step.get("n_initial_points", session.optimiser_config.n_initial_points))
+    # Safely extract all required fields with sensible fallbacks
+    condition_label  = step.get("condition_label") or "condition"
+    condition_value_raw = step.get("condition_value")
+    condition_value  = float(condition_value_raw) if condition_value_raw is not None else 0.0
+    free_params      = step.get("free_params") or []
+    objective_metric = step.get("objective_metric") or "objective"
+    n_calls          = int(step.get("n_calls") or session.optimiser_config.n_calls)
+    n_init           = int(step.get("n_initial_points") or session.optimiser_config.n_initial_points)
     conditions       = {condition_label: condition_value}
+
+    # Validate free_params — skip if empty
+    if not free_params:
+        events = [ExecutionEvent(
+            event_type="optimiser_error",
+            message="BO step has no free parameters defined. Please specify parameters to optimise.",
+            equipment="optimiser",
+            category="planning",
+            payload={},
+        )]
+        session.agent_state.messages.append({
+            "role": "assistant",
+            "content": (
+                "⚠️ The optimisation step has no free parameters defined. "
+                "Please specify which parameters to optimise (e.g. active_material, porosity) "
+                "and their ranges in the workflow editor."
+            ),
+        })
+        return events
 
     from app.core.tool_registry import TOOL_REGISTRY
     synthesis        = TOOL_REGISTRY.list_by_sub_category("synthesis")
@@ -595,8 +617,6 @@ def expand_optimise_condition_to_events(
         end_time = _now()
         _log_resource(session, synth_name, start_time, end_time)
 
-        prep_result = _execute_preparation(synth_name, param_dict)
-
         if prep_result["status"] != "ok":
             failed_samples += 1
             failed_id = generate_sample_id(session)
@@ -643,7 +663,6 @@ def expand_optimise_condition_to_events(
         end_time = _now()
         _log_resource(session, char_name, start_time, end_time)
 
-        objective_value = _execute_measurement(char_name, param_dict, conditions)
         opt.update(suggestion, objective_value)
         successes += 1
 
@@ -1011,6 +1030,28 @@ def build_execution_plan_from_tool_calls(session, tool_calls: List[dict]) -> Lis
                 step["instrument_id"] = str(raw_id)
                 step.setdefault("status", "pending")
                 step.setdefault("dependencies", [])
+                
+                if step.get("kind") == "optimise_condition":
+                    # Ensure condition fields are present and valid
+                    if not step.get("condition_label"):
+                        step["condition_label"] = "condition"
+                    # condition_value must be a number — default to 0 only as last resort
+                    if step.get("condition_value") is None:
+                        step["condition_value"] = 0.0
+                    else:
+                        step["condition_value"] = float(step["condition_value"])
+                    # Ensure free_params is a list
+                    if not step.get("free_params"):
+                        step["free_params"] = []
+                    # Ensure objective_metric is set
+                    if not step.get("objective_metric"):
+                        step["objective_metric"] = "objective"
+                    # Ensure n_calls and n_initial_points are integers
+                    if not step.get("n_calls"):
+                        step["n_calls"] = session.optimiser_config.n_calls
+                    if not step.get("n_initial_points"):
+                        step["n_initial_points"] = session.optimiser_config.n_initial_points
+                
                 plan.append(step)
 
         elif name == "generate_plot":
@@ -1112,7 +1153,7 @@ def build_dynamic_timeline(session) -> List[dict]:
         completed  = t.get("completed_calls", 0)
         remaining  = t.get("remaining_n_calls", 0)
         items.append({
-            "label":  f"Incomplete: {cond_label}={cond_value} ({completed} done, {remaining} remaining)",
+            "label":  f"Queued: {cond_label}={cond_value} ({completed} done, {remaining} remaining)",
             "status": "pending",
         })
 

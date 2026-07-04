@@ -50,8 +50,8 @@ interface ConditionGroup {
   status:    StepStatus;
   completed: number;
   total:     number;
-  projected_start_min?: number;
-  projected_end_min?:   number;
+  projected_start_time?: string;
+  projected_end_time?:   string;
 }
 
 function groupSteps(
@@ -88,7 +88,6 @@ function groupSteps(
 
     // Use projected timing from first step in group
     const firstStep = steps[0];
-
     groups.push({
       label:     firstStep?.label ?? key,
       condition: key,
@@ -96,8 +95,8 @@ function groupSteps(
       status,
       completed,
       total: steps.length,
-      projected_start_min: firstStep?.projected_start_min,
-      projected_end_min:   firstStep?.projected_end_min,
+      projected_start_time: firstStep?.projected_start_time,
+      projected_end_time:   firstStep?.projected_end_time,
     });
   }
 
@@ -176,14 +175,6 @@ function SingleStepNode({
   step:   WorkflowStep;
   status: StepStatus;
 }) {
-  const hasProjectedTime =
-    step.projected_start_min !== undefined &&
-    step.projected_end_min   !== undefined;
-
-  const duration = hasProjectedTime
-    ? Math.round((step.projected_end_min! - step.projected_start_min!) * 10) / 10
-    : null;
-
   return (
     <div className={cn(
       "flex items-center gap-2 px-3 py-2 rounded-lg border text-xs",
@@ -196,24 +187,26 @@ function SingleStepNode({
         <div className="font-medium truncate">
           {step.label || KIND_LABEL[step.kind] || step.kind}
         </div>
-        {step.kind === "prepare_sample" && step.params && (
+        {step.kind === "prepare_sample" && step.params && Object.keys(step.params).length > 0 && (
           <div className="text-[10px] opacity-70 truncate">
             {Object.entries(step.params).map(([k, v]) => `${k}=${v}`).join(", ")}
           </div>
         )}
         {step.kind === "test_sample" && (
           <div className="text-[10px] opacity-70 truncate">
-            {step.sample_ref} @{" "}
-            {Object.entries(step.conditions ?? {}).map(([k, v]) => `${k}=${v}`).join(", ")}
+            {step.sample_ref}
+            {step.conditions && Object.keys(step.conditions).length > 0 && (
+              <> @ {Object.entries(step.conditions).map(([k, v]) => `${k}=${v}`).join(", ")}</>
+            )}
+          </div>
+        )}
+        {step.kind === "optimise_condition" && step.condition_label && (
+          <div className="text-[10px] opacity-70 truncate">
+            {step.condition_label}={step.condition_value} {step.condition_unit ?? ""}
           </div>
         )}
       </div>
-      <div className="flex items-center gap-2 shrink-0">
-        {duration !== null && duration > 0 && (
-          <span className="text-[10px] text-slate-400">{duration}min</span>
-        )}
-        <span className="font-mono text-[11px]">{STATUS_ICON[status]}</span>
-      </div>
+      <span className="font-mono text-[11px] shrink-0">{STATUS_ICON[status]}</span>
     </div>
   );
 }
@@ -222,11 +215,6 @@ function ConditionGroupNode({ group }: { group: ConditionGroup }) {
   const pct = group.total > 0
     ? Math.round((group.completed / group.total) * 100)
     : 0;
-
-  const duration = group.projected_start_min !== undefined &&
-                   group.projected_end_min   !== undefined
-    ? Math.round(group.projected_end_min - group.projected_start_min)
-    : null;
 
   return (
     <div className={cn(
@@ -243,14 +231,9 @@ function ConditionGroupNode({ group }: { group: ConditionGroup }) {
             {group.completed}/{group.total} iterations
           </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {duration !== null && duration > 0 && (
-            <span className="text-[10px] text-slate-400">~{duration}min</span>
-          )}
-          <span className="font-mono text-[11px]">
-            {STATUS_ICON[group.status]}
-          </span>
-        </div>
+        <span className="font-mono text-[11px] shrink-0">
+          {STATUS_ICON[group.status]}
+        </span>
       </div>
 
       {group.total > 0 && (

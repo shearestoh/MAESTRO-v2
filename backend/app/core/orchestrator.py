@@ -47,28 +47,16 @@ def _lock_for(session_id: str) -> threading.Lock:
 
 
 def _welcome_message() -> dict:
-    from datetime import datetime
-    now   = datetime.now()
-    hour  = now.hour
-    ts    = now.strftime("%A, %d %B %Y %H:%M")
-    is_office = 9 <= hour < 17
-    office_note = (
-        "We're currently within office hours (09:00–17:00)."
-        if is_office else
-        f"Note: it's currently {ts}, outside standard office hours (09:00–17:00). "
-        "I can still operate the lab — let me know if you'd like to proceed."
-    )
     return {
         "role": "assistant",
         "content": (
-            f"Welcome to **MAESTRO** — your agentic scientific orchestrator.\n\n"
-            f"{office_note}\n\n"
-            f"You can:\n"
-            f"- Design and run experimental campaigns\n"
-            f"- Upload papers to the Library for reference and reproduction\n"
-            f"- Query and analyse your experimental results\n"
-            f"- Configure your lab via Lab Setup\n\n"
-            f"What would you like to explore today?"
+            "Welcome to **MAESTRO** — your agentic scientific orchestrator.\n\n"
+            "You can:\n"
+            "- Design and run experimental campaigns\n"
+            "- Upload papers to the Library for reference and reproduction\n"
+            "- Query and analyse your experimental results\n"
+            "- Configure your lab via Lab Setup\n\n"
+            "What would you like to explore today?"
         ),
     }
 
@@ -223,6 +211,8 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
                     steps=steps,
                     source="agent",
                 )
+                plan_steps = [step.model_dump() for step in session.pending_plan.steps]
+                session.projected_schedule = compute_projected_schedule(plan=plan_steps)
                 break
         return
 
@@ -372,7 +362,6 @@ def _sync_condition_key(session: SessionModel):
 
 def execute_plan(session_id: str, plan_dict: dict) -> SessionModel:
     from app.core.models import WorkflowPlan
-    from app.core.config import DB_PATH
 
     session = get_session(session_id)
     lock    = _lock_for(session_id)
@@ -380,11 +369,7 @@ def execute_plan(session_id: str, plan_dict: dict) -> SessionModel:
     plan  = WorkflowPlan(**plan_dict)
     steps = [step.model_dump() for step in plan.steps]
 
-    projected = compute_projected_schedule(
-        plan=steps,
-        current_clock_min=float(session.virtual_clock_minutes),
-        lab_end_min=480.0,
-    )
+    projected = compute_projected_schedule(plan=steps)
 
     with lock:
         session.background_job_plan        = steps
@@ -413,9 +398,6 @@ def execute_plan(session_id: str, plan_dict: dict) -> SessionModel:
 def resume_outstanding_tasks(session_id: str) -> SessionModel:
     session = get_session(session_id)
     lock    = _lock_for(session_id)
-
-    session.virtual_day_index    += 1
-    session.virtual_clock_minutes = 0
 
     outstanding = list(session.outstanding_tasks)
     if not outstanding:
@@ -730,11 +712,7 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
                 session.agent_state.pending_tool_calls    = []
             return session
 
-        projected = compute_projected_schedule(
-            plan=plan,
-            current_clock_min=float(session.virtual_clock_minutes),
-            lab_end_min=480.0,
-        )
+        projected = compute_projected_schedule(plan=plan)
 
         with lock:
             session.projected_schedule             = projected
@@ -779,10 +757,7 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
 
 def next_day(session_id: str) -> SessionModel:
     session = get_session(session_id)
-    session.virtual_day_index    += 1
-    session.virtual_clock_minutes = 0
     return session
-
 
 def register_artifact(session: SessionModel, name: str, kind: str, path: str):
     session.artifacts.append(ArtifactModel(name=name, kind=kind, path=path))
