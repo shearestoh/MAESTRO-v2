@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import type {
   VirtualInstrument, LabSettings,
-  OptimisationLibraryEntry, DocumentLibraryEntry, DocumentType,
+  OptimisationLibraryEntry, DocumentLibraryEntry,
 } from "@/types";
 
 type Tab = "instruments" | "optimisation" | "library" | "settings";
@@ -193,11 +193,11 @@ function InstrumentRow({
   onDelete:   () => void;
 }) {
   const subCatIcon: Record<string, string> = {
-    synthesis:      "🧪",
+    synthesis:       "🧪",
     characterisation:"⚡",
-    simulation:     "💻",
-    modelling:      "🧮",
-    data:           "💾",
+    simulation:      "💻",
+    modelling:       "🧮",
+    data:            "💾",
   };
 
   return (
@@ -223,8 +223,8 @@ function InstrumentRow({
         </div>
       </div>
       <div className="flex items-center gap-2 shrink-0">
-        {instrument.time_cost_min > 0 && (
-          <span className="text-[10px] text-slate-400">{instrument.time_cost_min}s</span>
+        {instrument.time_cost_s > 0 && (
+          <span className="text-[10px] text-slate-400">{instrument.time_cost_s}s</span>
         )}
         <button onClick={onEdit} className="text-xs text-slate-400 hover:text-blue-600 transition-colors px-2 py-1">
           Edit
@@ -251,7 +251,7 @@ function InstrumentForm({
   const [category,    setCategory]    = useState(initial?.category    ?? "physical");
   const [subCategory, setSubCategory] = useState(initial?.sub_category ?? "synthesis");
   const [description, setDescription] = useState(initial?.description ?? "");
-  const [timeCost,    setTimeCost]    = useState(String(initial?.time_cost_min ?? 5));
+  const [timeCostS,   setTimeCostS]   = useState(String(initial?.time_cost_s ?? 5));
   const [failRate,    setFailRate]    = useState(
     String(((initial?.failure_modes?.[0]?.probability ?? 0) * 100).toFixed(0))
   );
@@ -289,7 +289,7 @@ function InstrumentForm({
       category,
       sub_category: subCategory,
       description,
-      time_cost_min: parseFloat(timeCost) || 0,
+      time_cost_s: parseFloat(timeCostS) || 0,
       parameters: params.map((p) => ({
         name: p.name, type: "continuous",
         min: parseFloat(p.min) || null,
@@ -411,7 +411,7 @@ function InstrumentForm({
       <div className="grid grid-cols-3 gap-3">
         <div>
           <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">Time cost (s)</label>
-          <input className={inputCls} type="number" value={timeCost} onChange={(e) => setTimeCost(e.target.value)} min="0" />
+          <input className={inputCls} type="number" value={timeCostS} onChange={(e) => setTimeCostS(e.target.value)} min="0" />
         </div>
         <div>
           <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">Failure rate (%)</label>
@@ -491,8 +491,8 @@ function OptimisationTab() {
         <h3 className="text-sm font-semibold text-slate-700 mb-1">Optimisation library</h3>
         <p className="text-xs text-slate-500 mb-4">
           MAESTRO reads these descriptions and selects the most appropriate algorithm
-          for each task, including proposing suitable hyperparameters. Add or remove
-          libraries to guide the agent's choices.
+          for each task. Built-in libraries (scikit-optimize GP-BO and Random Search)
+          are always available. Optional libraries require separate installation.
         </p>
         <div className="space-y-3">
           {optimisationLibrary.map((lib) => (
@@ -502,7 +502,7 @@ function OptimisationTab() {
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-semibold text-slate-800">{lib.name}</span>
                     {lib.is_default && (
-                      <span className="text-[9px] text-slate-400 bg-slate-100 px-1 py-0.5 rounded">built-in</span>
+                      <span className="text-[9px] text-green-600 bg-green-50 px-1 py-0.5 rounded">built-in</span>
                     )}
                     {!lib.enabled && (
                       <span className="text-[9px] text-amber-600 bg-amber-50 px-1 py-0.5 rounded">disabled</span>
@@ -652,7 +652,8 @@ function LibraryTab() {
         <h3 className="text-sm font-semibold text-slate-700">Upload Document</h3>
         <p className="text-xs text-slate-500">
           Documents uploaded here are available to MAESTRO across all sessions
-          for question answering and campaign extraction.
+          for question answering and campaign extraction. Authors, year, DOI,
+          and journal are automatically extracted.
         </p>
         <div className="flex items-center gap-3">
           <input ref={fileRef} type="file" accept=".pdf" className="hidden" onChange={handleUpload} />
@@ -685,7 +686,7 @@ function LibraryTab() {
         documents={manuals}
         loading={loading}
         onRemove={handleRemove}
-        emptyMessage="No manuals uploaded. Upload instrument manuals for MAESTRO to reference."
+        emptyMessage="No manuals uploaded. Upload instrument manuals for MAESTRO to reference safety limits."
       />
     </div>
   );
@@ -782,9 +783,6 @@ function SettingsTab() {
     "focus:outline-none focus:border-blue-400",
   );
 
-  // Consistent section header style matching all other tabs
-  const sectionHeaderCls = "text-sm font-semibold text-slate-700";
-
   if (!labSettings) {
     return (
       <div className="flex items-center gap-2 text-slate-400">
@@ -796,9 +794,8 @@ function SettingsTab() {
 
   return (
     <div className="space-y-6 max-w-2xl">
-
       <div className="glass-panel p-4 space-y-3">
-        <h3 className={sectionHeaderCls}>Lab identity</h3>
+        <h3 className="text-sm font-semibold text-slate-700">Lab identity</h3>
         <div>
           <label className="text-[10px] text-slate-500 block mb-1">Lab name</label>
           <input
@@ -818,7 +815,7 @@ function SettingsTab() {
       </div>
 
       <div className="glass-panel p-4 space-y-3">
-        <h3 className={sectionHeaderCls}>Agent context</h3>
+        <h3 className="text-sm font-semibold text-slate-700">Agent context</h3>
         <p className="text-xs text-slate-500">
           This text is injected into MAESTRO's system prompt. Describe your lab's
           domain, research goals, safety constraints, or resource limits.

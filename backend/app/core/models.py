@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import uuid
 
 
@@ -42,6 +42,11 @@ class DocumentModel(BaseModel):
     sections:    List[SectionModel] = Field(default_factory=list)
     figures:     List[FigureModel]  = Field(default_factory=list)
     tables:      List[TableModel]   = Field(default_factory=list)
+    # Extracted paper metadata
+    authors:     List[str]          = Field(default_factory=list)
+    year:        Optional[int]      = None
+    doi:         Optional[str]      = None
+    journal:     Optional[str]      = None
 
 
 # ── Document Library ──────────────────────────────────────────────────────────
@@ -133,6 +138,9 @@ def generate_sample_id(session: "SessionModel") -> str:
 # ── Workflow Plan ─────────────────────────────────────────────────────────────
 
 class WorkflowStep(BaseModel):
+    # Accept and ignore extra fields from the frontend editor
+    model_config = ConfigDict(extra="ignore")
+
     step_id:       str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
     kind:          str
     label:         str
@@ -164,6 +172,8 @@ class WorkflowStep(BaseModel):
 
 
 class WorkflowPlan(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     plan_id:    str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
     summary:    str
     steps:      List[WorkflowStep]
@@ -188,8 +198,8 @@ class AgentStateModel(BaseModel):
 class EquipmentStatusModel(BaseModel):
     llm:       bool = False
     optimiser: bool = False
-    sampler:   bool = False
-    tester:    bool = False
+    synthesiser: bool = False
+    characteriser: bool = False
     memory:    bool = False
     knowledge: bool = False
     reporting: bool = False
@@ -197,17 +207,18 @@ class EquipmentStatusModel(BaseModel):
 
 # ── Results ───────────────────────────────────────────────────────────────────
 
-def make_result_entry(condition_label: str, condition_value: float) -> dict:
+def make_result_entry(condition_label: str, condition_value: float, optimiser_name: str = "") -> dict:
     return {
-        "condition_label": condition_label,
-        "condition_value": condition_value,
-        "param_names":     [],
-        "X":               [],
-        "y":               [],
-        "best_params":     {},
-        "best_objective":  None,
-        "failed_samples":  0,
-        "attempts":        0,
+        "condition_label":  condition_label,
+        "condition_value":  condition_value,
+        "optimiser_name":   optimiser_name,
+        "param_names":      [],
+        "X":                [],
+        "y":                [],
+        "best_params":      {},
+        "best_objective":   None,
+        "failed_samples":   0,
+        "attempts":         0,
         "termination_reason": None,
     }
 
@@ -279,6 +290,8 @@ class SessionModel(BaseModel):
     background_job_index:   int = 0
     background_job_status:  str = "idle"
     step_statuses:          Dict[str, str] = Field(default_factory=dict)
+    # bo_iteration_counts tracks {step_id: current_iteration} for live progress display
+    bo_iteration_counts:    Dict[str, int] = Field(default_factory=dict)
     projected_schedule:     List[ProjectedScheduleEntry] = Field(default_factory=list)
     live_event_queue:       List[ExecutionEvent] = Field(default_factory=list)
     resource_log:           List[dict] = Field(default_factory=list)
@@ -296,9 +309,6 @@ class UserMessageRequest(BaseModel):
 class ConfirmRequest(BaseModel):
     session_id: str
     proceed:    bool
-
-class NextDayRequest(BaseModel):
-    session_id: str
 
 class ResetRequest(BaseModel):
     session_id: str

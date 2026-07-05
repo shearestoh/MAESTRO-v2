@@ -19,7 +19,6 @@ interface MaestroStore {
   sendMessage:              (text: string) => Promise<void>;
   confirm:                  (proceed: boolean) => Promise<void>;
   executePlan:              (plan: WorkflowPlan) => Promise<void>;
-  nextDay:                  () => Promise<void>;
   reset:                    () => Promise<void>;
   pushWsEvent:              (event: WsEvent) => void;
   setWsConnected:           (v: boolean) => void;
@@ -121,13 +120,6 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     } catch (e) {
       set({ error: String(e), isLoading: false });
     }
-  },
-
-  nextDay: async () => {
-    const { sessionId } = get();
-    if (!sessionId) return;
-    const res = await api.nextDay(sessionId);
-    set({ state: res.state });
   },
 
   reset: async () => {

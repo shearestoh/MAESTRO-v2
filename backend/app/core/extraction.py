@@ -7,6 +7,8 @@ import json
 import uuid
 from typing import List
 
+import numpy as np
+
 from app.core.documents import get_document, retrieve_relevant_passages
 from app.core.llm import call_llm, _MAX_PROMPT_CHARS
 from app.core.models import CampaignSpec, CaseStudyExtraction
@@ -39,7 +41,6 @@ def _looks_like_condition(param: dict) -> bool:
 
 
 def _infer_condition_values(param: dict) -> list[float]:
-    import numpy as np
     p_min = float(param.get("min", 0))
     p_max = float(param.get("max", 1))
     if p_min == p_max:
@@ -82,7 +83,6 @@ def _postprocess_campaign_dict(data: dict) -> dict:
             p_min = oc.get("min")
             p_max = oc.get("max")
             if p_min is not None and p_max is not None:
-                import numpy as np
                 values = [round(float(v), 4) for v in np.linspace(float(p_min), float(p_max), 5)]
             else:
                 continue
@@ -136,7 +136,6 @@ def extract_case_study_to_campaign(
     if doc.sections:
         for s in doc.sections:
             if case_name.lower() in s.heading.lower():
-                from app.core.documents import get_tables_for_section
                 tbls = [t for t in doc.tables if t.section == s.heading]
                 if tbls:
                     table_context = "\n\nEXTRACTED TABLES:\n"

@@ -11,15 +11,6 @@ export function Campaign() {
   const campaign = state?.extracted_campaign;
   const results  = state?.results_store ?? [];
 
-  const getConditionLabel = (r: ResultEntry): string => {
-    const label = r.condition_label || "condition";
-    const value = r.condition_value  ?? r.power_W ?? 0;
-    return `${label} = ${value}`;
-  };
-
-  const getBestObjective = (r: ResultEntry): number | null =>
-    r.best_objective ?? r.best_energy ?? null;
-
   return (
     <div className="flex flex-col h-full p-4 gap-4 overflow-y-auto">
       <div>
@@ -34,7 +25,8 @@ export function Campaign() {
           <div className="text-5xl">🔬</div>
           <div className="text-sm font-semibold text-slate-700">No campaign active</div>
           <div className="text-xs text-slate-500 max-w-xs">
-            Upload a paper in the chat and ask MAESTRO to check feasibility.
+            Upload a paper in the chat and ask MAESTRO to check feasibility,
+            or ask MAESTRO to run an optimisation campaign directly.
             Campaign details will appear here automatically.
           </div>
         </div>
@@ -136,8 +128,9 @@ export function Campaign() {
                 </div>
                 <div className="space-y-3">
                   {results.map((r, idx) => {
-                    const condLabel   = getConditionLabel(r);
-                    const bestObj     = getBestObjective(r);
+                    const condLabel   = r.condition_label || "condition";
+                    const condValue   = r.condition_value ?? 0;
+                    const bestObj     = r.best_objective ?? null;
                     const objMetric   = campaign.objective_metric ?? "objective";
                     const nEvals      = r.X.length;
                     const nCallsTarget = state?.optimiser_config?.n_calls ?? 20;
@@ -146,7 +139,9 @@ export function Campaign() {
                     return (
                       <div key={idx} className="glass-panel p-3 space-y-2">
                         <div className="flex justify-between items-center">
-                          <span className="text-sm font-bold text-slate-800 truncate">{condLabel}</span>
+                          <span className="text-sm font-bold text-slate-800 truncate">
+                            {condLabel} = {condValue}
+                          </span>
                           <span className={cn(
                             "text-xs px-2 py-0.5 rounded-full shrink-0",
                             nEvals > 0 ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-500",

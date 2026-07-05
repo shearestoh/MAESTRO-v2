@@ -14,7 +14,7 @@ export function LabNotebook() {
   const samples = state?.sample_registry ?? [];
   const results = state?.results_store   ?? [];
 
-  const synthesisSamples = samples.filter((s) => s.results.length === 0 || s.status === "prepared" || s.status === "failed");
+  const synthesisSamples        = samples.filter((s) => s.status === "prepared" || s.status === "failed");
   const characterisationSamples = samples.filter((s) => s.results.length > 0);
 
   const tabs: { id: Tab; label: string; count: number }[] = [
@@ -92,7 +92,7 @@ function SynthesisTab({ samples }: { samples: Sample[] }) {
       <EmptyState
         icon="🧪"
         title="No synthesis records"
-        description="Prepared samples will appear here. Ask MAESTRO to prepare a sample or run a campaign."
+        description="Synthesised samples will appear here. Ask MAESTRO to synthesise a sample or run a campaign."
       />
     );
   }
@@ -110,7 +110,7 @@ function SynthesisTab({ samples }: { samples: Sample[] }) {
   return (
     <div className="space-y-2 max-w-3xl">
       <div className="text-xs text-slate-500 mb-3">
-        {samples.length} sample{samples.length !== 1 ? "s" : ""} prepared
+        {samples.length} sample{samples.length !== 1 ? "s" : ""} synthesised
       </div>
       {samples.map((s) => (
         <div key={s.sample_id} className="glass-panel overflow-hidden">
@@ -129,7 +129,7 @@ function SynthesisTab({ samples }: { samples: Sample[] }) {
               <div className="text-xs text-slate-500 mt-0.5">
                 {Object.entries(s.params).map(([k, v]) => `${k}=${v}`).join(", ")}
                 {" · "}{s.prepared_by}
-                {" · "}Day {s.prepared_day} {s.prepared_at}
+                {" · "}{s.prepared_at ? new Date(s.prepared_at).toLocaleString() : ""}
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
@@ -148,7 +148,7 @@ function SynthesisTab({ samples }: { samples: Sample[] }) {
             <div className="px-4 pb-4 space-y-3 border-t border-slate-100">
               <div className="pt-3">
                 <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  Preparation Parameters
+                  Synthesis Parameters
                 </div>
                 <div className="grid grid-cols-3 gap-1 text-xs">
                   {Object.entries(s.params).map(([k, v]) => (
@@ -194,7 +194,7 @@ function CharacterisationTab({
       <EmptyState
         icon="⚡"
         title="No characterisation records"
-        description="Test results will appear here. Ask MAESTRO to test a sample or run a campaign."
+        description="Characterisation results will appear here. Ask MAESTRO to characterise a sample or run a campaign."
       />
     );
   }
@@ -204,7 +204,7 @@ function CharacterisationTab({
   return (
     <div className="space-y-2 max-w-3xl">
       <div className="text-xs text-slate-500 mb-3">
-        {samples.length} sample{samples.length !== 1 ? "s" : ""} tested
+        {samples.length} sample{samples.length !== 1 ? "s" : ""} characterised
         {conditionKey && (
           <span className="ml-2">
             · varying <span className="font-mono text-blue-600">{conditionKey}</span>
@@ -263,12 +263,12 @@ function CharacterisationTab({
             {expanded.has(s.sample_id) && (
               <div className="px-4 pb-4 space-y-2 border-t border-slate-100">
                 <div className="pt-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  Test Results
+                  Characterisation Results
                 </div>
                 {s.results.map((r) => (
                   <div key={r.result_id} className="text-xs bg-slate-50 rounded p-2 space-y-1">
                     <div className="flex justify-between text-slate-500">
-                      <span>Day {r.tested_day} {r.tested_at}</span>
+                      <span>{r.tested_at ? new Date(r.tested_at).toLocaleString() : ""}</span>
                       <span className="text-slate-400">{r.tested_by}</span>
                     </div>
                     <div className="text-slate-600">
@@ -317,8 +317,8 @@ function ComputationTab({
       </div>
       {results.map((r, idx) => {
         const label   = r.condition_label || "condition";
-        const value   = r.condition_value ?? r.power_W ?? 0;
-        const bestObj = r.best_objective ?? r.best_energy ?? null;
+        const value   = r.condition_value ?? 0;
+        const bestObj = r.best_objective ?? null;
         const nEvals  = r.X.length;
         const pct     = Math.min(100, (nEvals / nCallsTarget) * 100);
 

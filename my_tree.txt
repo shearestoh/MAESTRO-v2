@@ -36,8 +36,7 @@
 │   │       └── random_search.py
 │   ├── lab_config.json
 │   ├── lab_documents
-│   │   ├── 1a5c3552-942e-460f-9cf3-59315ff94277.pdf
-│   │   └── 1e6d6ef9-5cc8-4c8d-8834-13e6adbc6ac2.pdf
+│   │   └── 1a5c3552-942e-460f-9cf3-59315ff94277.pdf
 │   ├── maestro.db
 │   ├── main.py
 │   ├── pyproject.toml
@@ -1238,4 +1237,4 @@
 │   └── vite.config.ts
 └── my_tree.txt
 
-396 directories, 843 files
+396 directories, 842 files

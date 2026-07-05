@@ -1,9 +1,8 @@
 """
-Session management and workflow execution.
+Session management and workflow execution for MAESTRO.
 
-All actions that use physical instruments require user approval via the
-workflow plan before execution. Non-instrument actions (analysis, plotting,
-database queries, RAG) execute immediately.
+All instrument actions require user approval via the workflow plan before
+execution. Non-instrument actions execute immediately.
 """
 from __future__ import annotations
 
@@ -33,8 +32,8 @@ SESSIONS:      Dict[str, SessionModel]    = {}
 SESSION_LOCKS: Dict[str, threading.Lock] = {}
 
 _INSTRUMENT_STEP_KINDS = {
-    "prepare_sample",
-    "test_sample",
+    "synthesise",
+    "characterise",
     "optimise_condition",
     "extract_feasibility",
 }
@@ -100,7 +99,6 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
     lock    = _lock_for(session_id)
 
     with lock:
-
         if session.pending_plan is not None:
             session.pending_plan = None
             session.agent_state.awaiting_confirmation = False
@@ -201,7 +199,7 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
                         editable = ["n_calls", "n_initial_points", "condition_value"]
                         for fp in s.get("free_params", []):
                             editable += [f"{fp['name']}_min", f"{fp['name']}_max"]
-                    elif s.get("kind") in ("prepare_sample", "test_sample"):
+                    elif s.get("kind") in ("synthesise", "characterise"):
                         editable = list(s.get("params", {}).keys()) + list(s.get("conditions", {}).keys())
                     s["editable_fields"] = editable
                     steps.append(WorkflowStep(**s))
@@ -314,6 +312,8 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
         session.agent_state.pending_tool_calls    = []
 
     dag_context = {}
+    tool_results = []
+
     for tc in pending_calls:
         name = tc["function"]["name"]
         args = {}
@@ -322,35 +322,56 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
         except Exception:
             pass
 
+        step_kind_map = {
+            "list_samples":   "list_samples",
+            "generate_plot":  "generate_plot",
+            "analyse_data":   "analyse_data",
+            "query_database": "query_database",
+        }
+
+        if name not in step_kind_map:
+            continue
+
+        step = {
+            "kind":          step_kind_map[name],
+            "label":         args.get("description", name),
+            "plot_code":     args.get("plot_code", ""),
+            "analysis_code": args.get("analysis_code", ""),
+            "sql":           args.get("sql", ""),
+            "description":   args.get("description", ""),
+        }
+
+        try:
+            result = execute_plan_step(session, step, query_database, dag_context)
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+
+        # Inject the tool response into the message history so the LLM can read it
+        tool_response_content = json.dumps(result, default=str)
         session.agent_state.messages.append({
             "role":         "tool",
             "tool_call_id": tc["id"],
             "name":         name,
-            "content":      json.dumps({"status": "running"}),
+            "content":      tool_response_content,
         })
+        tool_results.append((name, result))
 
-        step_kind_map = {
-            "list_samples":  "list_samples",
-            "generate_plot": "generate_plot",
-            "analyse_data":  "analyse_data",
-            "query_database":"query_database",
-        }
+    needs_followup = any(
+        name == "query_database"
+        for name, _ in tool_results
+    )
 
-        if name in step_kind_map:
-            step = {
-                "kind":          step_kind_map[name],
-                "label":         args.get("description", name),
-                "plot_code":     args.get("plot_code", ""),
-                "analysis_code": args.get("analysis_code", ""),
-                "sql":           args.get("sql", ""),
-                "description":   args.get("description", ""),
-            }
-            try:
-                execute_plan_step(session, step, query_database, dag_context)
-            except Exception as e:
-                session.agent_state.messages.append({
-                    "role": "assistant", "content": f"Error: `{e}`"
-                })
+    if needs_followup:
+        with lock:
+            session.equipment_status.llm = True
+            session.current_activity     = "Interpreting results..."
+
+        # Call LLM to interpret the query result and produce a user message
+        llm_plan(session)
+
+        with lock:
+            session.equipment_status.llm = False
+            session.current_activity     = None
 
 
 def _sync_condition_key(session: SessionModel):
@@ -381,6 +402,7 @@ def execute_plan(session_id: str, plan_dict: dict) -> SessionModel:
         session.live_event_queue           = []
         session.pending_plan               = None
         session.projected_schedule         = projected
+        session.bo_iteration_counts        = {}
         session.agent_state.awaiting_confirmation = False
         session.agent_state.pending_tool_calls    = []
         _inject_missing_tool_responses(session)
@@ -395,61 +417,6 @@ def execute_plan(session_id: str, plan_dict: dict) -> SessionModel:
     return session
 
 
-def resume_outstanding_tasks(session_id: str) -> SessionModel:
-    session = get_session(session_id)
-    lock    = _lock_for(session_id)
-
-    outstanding = list(session.outstanding_tasks)
-    if not outstanding:
-        session.agent_state.messages.append({
-            "role":    "assistant",
-            "content": "No outstanding tasks to resume.",
-        })
-        return session
-
-    plan = []
-    for task in outstanding:
-        plan.append({
-            "kind":             "optimise_condition",
-            "condition_label":  task.get("condition_label", "condition"),
-            "condition_value":  float(task.get("condition_value", 0)),
-            "condition_unit":   task.get("condition_unit", ""),
-            "free_params":      task.get("free_params", []),
-            "objective_metric": task.get("objective_metric", "objective"),
-            "n_calls":          int(task.get("remaining_n_calls", 20)),
-            "n_initial_points": 3,
-        })
-
-    if not plan:
-        return session
-
-    with lock:
-        session.outstanding_tasks          = []
-        session.background_job_plan        = plan
-        session.background_job_index       = 0
-        session.background_job_status      = "running"
-        session.background_job_active      = True
-        session.background_job_label       = "Resuming incomplete runs..."
-        session.background_job_error       = None
-        session.live_event_queue           = []
-        session.agent_state.awaiting_confirmation = False
-        session.agent_state.pending_tool_calls    = []
-
-    session.agent_state.messages.append({
-        "role":    "assistant",
-        "content": f"▶️ Resuming {len(plan)} incomplete run(s).",
-    })
-
-    threading.Thread(
-        target=_run_background_job,
-        args=(session_id,),
-        daemon=True,
-        name=f"maestro-resume-{session_id[:8]}",
-    ).start()
-
-    return session
-
-
 def _consume_one_live_event(session: SessionModel):
     if not session.live_event_queue:
         return
@@ -457,12 +424,12 @@ def _consume_one_live_event(session: SessionModel):
     session.current_activity     = event.message
     session.background_job_label = event.message
     session.activity_log.append(f"[{event.category.upper()}] {event.message}")
-    session.activity_log = session.activity_log[-20:]
+    session.activity_log = session.activity_log[-50:]
     session.equipment_status = EquipmentStatusModel()
     eq_map = {
-        "llm": "llm", "optimiser": "optimiser", "sampler": "sampler",
-        "tester": "tester", "memory": "memory", "knowledge": "knowledge",
-        "reporting": "reporting",
+        "llm": "llm", "optimiser": "optimiser",
+        "synthesiser": "synthesiser", "characteriser": "characteriser",
+        "memory": "memory", "knowledge": "knowledge", "reporting": "reporting",
     }
     eq_key = eq_map.get(event.equipment or "")
     if eq_key:
@@ -635,7 +602,7 @@ def _run_background_job(session_id: str):
             except Exception as step_err:
                 with lock:
                     session.activity_log.append(f"[WARNING] Step '{step.get('kind')}' error: {step_err}")
-                    session.activity_log = session.activity_log[-20:]
+                    session.activity_log = session.activity_log[-50:]
                 set_step_status(step_id, "failed")
 
         with lock:
@@ -697,8 +664,10 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
     session = get_session(session_id)
     lock    = _lock_for(session_id)
 
+    has_pending = session.agent_state.awaiting_confirmation or session.pending_plan is not None
+
     with lock:
-        if not session.agent_state.awaiting_confirmation:
+        if not has_pending:
             return session
 
     if proceed:
@@ -723,6 +692,8 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
             session.background_job_label           = "Initialising..."
             session.background_job_error           = None
             session.live_event_queue               = []
+            session.pending_plan                   = None
+            session.bo_iteration_counts            = {}
             session.agent_state.awaiting_confirmation = False
             session.agent_state.pending_tool_calls    = []
 
@@ -745,6 +716,7 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
             session.agent_state.messages.append({"role": "user", "content": "abort"})
             session.agent_state.awaiting_confirmation = False
             session.agent_state.pending_tool_calls    = []
+            session.pending_plan                      = None
             session.equipment_status.llm              = True
 
         llm_plan(session)
@@ -754,10 +726,6 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
 
     return session
 
-
-def next_day(session_id: str) -> SessionModel:
-    session = get_session(session_id)
-    return session
 
 def register_artifact(session: SessionModel, name: str, kind: str, path: str):
     session.artifacts.append(ArtifactModel(name=name, kind=kind, path=path))
@@ -803,6 +771,7 @@ def session_state_payload(session: SessionModel) -> dict:
         "background_job_plan_length": len(session.background_job_plan),
         "background_job_plan":        session.background_job_plan,
         "step_statuses":              session.step_statuses,
+        "bo_iteration_counts":        session.bo_iteration_counts,
         "timeline":                   build_dynamic_timeline(session),
         "active_condition_key":       session.active_condition_key,
         "sample_registry":            [s.model_dump() for s in session.sample_registry],

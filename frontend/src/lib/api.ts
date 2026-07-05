@@ -37,12 +37,6 @@ export const api = {
       body:   JSON.stringify({ session_id: sessionId, proceed }),
     }),
 
-  nextDay: (sessionId: string) =>
-    request<{ state: SessionState }>("/next-day", {
-      method: "POST",
-      body:   JSON.stringify({ session_id: sessionId }),
-    }),
-
   reset: (sessionId: string) =>
     request<{ state: SessionState }>("/reset", {
       method: "POST",
@@ -69,6 +63,10 @@ export const api = {
     request<{
       status:   string;
       title:    string;
+      authors:  string[];
+      year:     number | null;
+      doi:      string | null;
+      journal:  string | null;
       sections: unknown[];
       figures:  unknown[];
       tables:   unknown[];

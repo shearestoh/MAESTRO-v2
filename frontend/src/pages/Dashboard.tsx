@@ -5,24 +5,6 @@ import { ResourceSchedule }   from "@/components/shared/ResourceSchedule";
 import { Visualisation }      from "@/components/shared/Visualisation";
 import { useMaestroStore }    from "@/store/maestroStore";
 
-function MaestroLogo({ size = 20 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
-      <circle cx="16" cy="16" r="16" fill="#2563eb"/>
-      <text
-        x="16" y="22"
-        fontFamily="system-ui, sans-serif"
-        fontSize="18"
-        fontWeight="900"
-        fill="white"
-        textAnchor="middle"
-      >
-        M
-      </text>
-    </svg>
-  );
-}
-
 const panelHeaderCls = "text-sm font-semibold text-slate-700";
 
 export function Dashboard() {

@@ -11,4 +11,6 @@ BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
 
 DB_PATH = "maestro.db"
 
+# Maximum total BO attempts = n_calls × this factor.
+# Prevents infinite loops when sample failure rate is high.
 MAX_TOTAL_ATTEMPTS_FACTOR = 3

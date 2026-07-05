@@ -23,7 +23,6 @@ from app.core.models import (
     ConfirmRequest,
     CreateSessionResponse,
     ExecutionEvent,
-    NextDayRequest,
     OptimiserConfig,
     ResetRequest,
     StateResponse,
@@ -36,11 +35,9 @@ from app.core.orchestrator import (
     create_session,
     execute_plan,
     get_session,
-    next_day,
     post_user_message,
     register_artifact,
     reset_session,
-    resume_outstanding_tasks,
     session_state_payload,
 )
 from app.core.lab_config import (
@@ -58,7 +55,7 @@ router = APIRouter()
 
 def _summarise_document(doc) -> str:
     from app.core.documents import get_document_summary_chunk
-    chunk = get_document_summary_chunk(doc.document_id, max_chars=3000)
+    chunk = get_document_summary_chunk(doc.document_id, max_chars=2000)
     msg = call_llm(
         messages=[
             {
@@ -168,26 +165,6 @@ def execute_plan_route(req: ExecutePlanRequest):
         raise HTTPException(500, f"{type(e).__name__}: {e}")
 
 
-@router.post("/next-day", response_model=StateResponse)
-def next_day_route(req: NextDayRequest):
-    try:
-        session = next_day(req.session_id)
-        return StateResponse(session_id=req.session_id, state=session_state_payload(session))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-
-
-@router.post("/resume-outstanding", response_model=StateResponse)
-def resume_outstanding_route(req: NextDayRequest):
-    try:
-        session = resume_outstanding_tasks(req.session_id)
-        return StateResponse(session_id=req.session_id, state=session_state_payload(session))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    except Exception as e:
-        raise HTTPException(500, f"{type(e).__name__}: {e}")
-
-
 @router.post("/reset", response_model=StateResponse)
 def reset_route(req: ResetRequest):
     try:
@@ -265,6 +242,17 @@ async def upload_document(
             if doc.sections else ""
         )
 
+        # Build metadata note for the chat message
+        meta_note = ""
+        if doc.authors:
+            meta_note += f"\n- **Authors:** {', '.join(doc.authors[:5])}"
+            if len(doc.authors) > 5:
+                meta_note += f" et al."
+        if doc.year:
+            meta_note += f"\n- **Year:** {doc.year}"
+        if doc.doi:
+            meta_note += f"\n- **DOI:** {doc.doi}"
+
         session.live_event_queue.append(ExecutionEvent(
             event_type="knowledge_done",
             message=(
@@ -285,9 +273,11 @@ async def upload_document(
             "role":    "assistant",
             "content": (
                 f"{doc.summary or f'Paper **{doc.filename}** ingested.'}"
+                f"{meta_note}"
                 f" (parsed with MinerU){section_note}\n\n"
                 f"What would you like to do? I can:\n"
                 f"- Summarise the paper in more detail\n"
+                f"- Answer questions about authors, year, methods, or findings\n"
                 f"- Extract and check feasibility of a specific case study\n"
                 f"- Reproduce a result (tell me which case study or figure)"
             ),
@@ -318,6 +308,10 @@ def get_document_structure(document_id: str):
         return {
             "status":   "ok",
             "title":    doc.title,
+            "authors":  doc.authors,
+            "year":     doc.year,
+            "doi":      doc.doi,
+            "journal":  doc.journal,
             "sections": [s.model_dump() for s in doc.sections],
             "figures":  [f.model_dump() for f in doc.figures],
             "tables":   [t.model_dump() for t in doc.tables],

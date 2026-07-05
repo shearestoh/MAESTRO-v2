@@ -4,13 +4,21 @@ Execution engine for MAESTRO workflow steps.
 Physical instrument steps are executed via adapters (app/adapters/).
 The engine is instrument-agnostic: it reads instrument definitions from
 the registry and dispatches to the appropriate adapter.
+
+Step kinds:
+  synthesise        — prepare a physical sample
+  characterise      — measure a prepared sample
+  optimise_condition — closed-loop Bayesian optimisation
+  generate_plot     — matplotlib figure generation (subprocess-isolated)
+  analyse_data      — numpy/scipy analysis (subprocess-isolated)
+  query_database    — read-only SQL query
+  list_samples      — sample registry lookup
 """
 from __future__ import annotations
 
 import importlib
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -103,14 +111,20 @@ def get_or_create_result_for_condition(
     results_store:   List[dict],
     condition_label: str,
     condition_value: float,
+    optimiser_name:  str = "",
 ) -> dict:
+    """
+    Find an existing result entry matching condition + optimiser, or create a new one.
+    Each (condition, optimiser) pair gets its own entry, allowing comparison across methods.
+    """
     for r in results_store:
         if (
             r.get("condition_label") == condition_label
             and abs(r.get("condition_value", float("nan")) - condition_value) < 1e-9
+            and r.get("optimiser_name", "") == optimiser_name
         ):
             return r
-    entry = make_result_entry(condition_label, condition_value)
+    entry = make_result_entry(condition_label, condition_value, optimiser_name)
     results_store.append(entry)
     return entry
 
@@ -121,10 +135,11 @@ def _log_resource(session, instrument_name: str, start_time: str, end_time: str)
         "start_time": start_time,
         "end_time":   end_time,
     })
-    session.resource_log = session.resource_log[-200:]
+    session.resource_log = session.resource_log[-500:]
 
 
 def _resolve_ref(value: Any, context: Dict[str, Any]) -> Any:
+    import re
     if not isinstance(value, str):
         return value
     match = re.compile(r"\{\{(\w+)\}\}").fullmatch(value.strip())
@@ -143,15 +158,17 @@ def compute_projected_schedule(
     plan: List[dict],
 ) -> List[ProjectedScheduleEntry]:
     """
-    Compute projected start/end times for each step using real wall-clock time.
-    Steps are scheduled sequentially from now, respecting instrument availability.
+    Compute projected start/end times for each step.
+
+    For optimise_condition steps, generates individual projected bars for each
+    BO iteration across the synthesis and characterisation instruments.
     """
     from app.core.tool_registry import INSTRUMENT_REGISTRY
-    from datetime import datetime, timedelta
+    from datetime import datetime as dt, timedelta
 
-    now = datetime.utcnow()
-    step_end:        Dict[str, datetime] = {}
-    instrument_free: Dict[str, datetime] = {}
+    now = dt.utcnow()
+    step_end:        Dict[str, dt] = {}
+    instrument_free: Dict[str, dt] = {}
     entries:         List[ProjectedScheduleEntry] = []
 
     def get_duration_seconds(step: dict) -> float:
@@ -161,50 +178,101 @@ def compute_projected_schedule(
             if cost >= 0:
                 return cost
         kind = step.get("kind", "")
-        if kind in ("prepare_sample", "test_sample", "optimise_condition"):
+        if kind in ("synthesise", "characterise"):
             return 5.0
         return 0.0
 
     for step in plan:
-        step_id = step.get("step_id") or ""
-        raw_instrument_id = (
-            step.get("instrument_id")
-            or step.get("instrument")
-            or step.get("kind")
-            or "unknown"
-        )
-        instrument_id   = str(raw_instrument_id) if raw_instrument_id is not None else "unknown"
-        raw_instrument_name = step.get("instrument") or step.get("label") or instrument_id
-        instrument_name = str(raw_instrument_name) if raw_instrument_name is not None else instrument_id
-        dependencies    = step.get("dependencies", [])
-        duration_s      = get_duration_seconds(step)
+        step_id      = step.get("step_id") or ""
+        kind         = step.get("kind", "")
+        dependencies = step.get("dependencies", [])
 
-        dep_end   = max(
+        dep_end = max(
             (step_end.get(dep_id, now) for dep_id in dependencies),
             default=now,
         )
-        inst_free  = instrument_free.get(instrument_id, now)
-        proj_start = max(dep_end, inst_free, now)
-        proj_end   = proj_start + timedelta(seconds=duration_s)
 
-        step_end[step_id]              = proj_end
-        instrument_free[instrument_id] = proj_end
+        if kind == "optimise_condition":
+            # Generate one projected bar per BO iteration for each instrument
+            n_calls = int(step.get("n_calls") or 10)
 
-        step["projected_start_time"] = proj_start.isoformat()
-        step["projected_end_time"]   = proj_end.isoformat()
+            synth_instruments = INSTRUMENT_REGISTRY.list_by_sub_category("synthesis")
+            char_instruments  = INSTRUMENT_REGISTRY.list_by_sub_category("characterisation")
+            synth_name = synth_instruments[0].name if synth_instruments else "Synthesiser"
+            char_name  = char_instruments[0].name  if char_instruments  else "Characteriser"
+            synth_time = INSTRUMENT_REGISTRY.get_time_cost(synth_name, default=5.0)
+            char_time  = INSTRUMENT_REGISTRY.get_time_cost(char_name,  default=8.0)
 
-        if duration_s > 0 and instrument_id not in (
-            "optimiser", "memory", "reporting", "knowledge", "unknown", ""
-        ):
-            entries.append(ProjectedScheduleEntry(
-                instrument_id=instrument_id,
-                instrument_name=instrument_name,
-                start_time=proj_start.isoformat(),
-                end_time=proj_end.isoformat(),
-                step_id=step_id,
-                label=step.get("label", step.get("kind", "")),
-                is_projected=True,
-            ))
+            label_base = step.get("label", "BO")
+            cursor     = max(dep_end, instrument_free.get("optimiser", now), now)
+
+            for i in range(n_calls):
+                synth_start = max(cursor, instrument_free.get(synth_name, now))
+                synth_end   = synth_start + timedelta(seconds=synth_time)
+                entries.append(ProjectedScheduleEntry(
+                    instrument_id=synth_name,
+                    instrument_name=synth_name,
+                    start_time=synth_start.isoformat(),
+                    end_time=synth_end.isoformat(),
+                    step_id=f"{step_id}-synth-{i}",
+                    label=f"{label_base} iter {i + 1} — synthesise",
+                    is_projected=True,
+                ))
+                instrument_free[synth_name] = synth_end
+
+                char_start = max(synth_end, instrument_free.get(char_name, now))
+                char_end   = char_start + timedelta(seconds=char_time)
+                entries.append(ProjectedScheduleEntry(
+                    instrument_id=char_name,
+                    instrument_name=char_name,
+                    start_time=char_start.isoformat(),
+                    end_time=char_end.isoformat(),
+                    step_id=f"{step_id}-char-{i}",
+                    label=f"{label_base} iter {i + 1} — characterise",
+                    is_projected=True,
+                ))
+                instrument_free[char_name] = char_end
+                cursor = char_end
+
+            step_end[step_id]            = cursor
+            instrument_free["optimiser"] = cursor
+            step["projected_start_time"] = max(dep_end, now).isoformat()
+            step["projected_end_time"]   = cursor.isoformat()
+
+        else:
+            raw_instrument_id = (
+                step.get("instrument_id")
+                or step.get("instrument")
+                or step.get("kind")
+                or "unknown"
+            )
+            instrument_id   = str(raw_instrument_id) if raw_instrument_id is not None else "unknown"
+            raw_instrument_name = step.get("instrument") or step.get("label") or instrument_id
+            instrument_name = str(raw_instrument_name) if raw_instrument_name is not None else instrument_id
+            duration_s      = get_duration_seconds(step)
+
+            inst_free  = instrument_free.get(instrument_id, now)
+            proj_start = max(dep_end, inst_free, now)
+            proj_end   = proj_start + timedelta(seconds=duration_s)
+
+            step_end[step_id]              = proj_end
+            instrument_free[instrument_id] = proj_end
+
+            step["projected_start_time"] = proj_start.isoformat()
+            step["projected_end_time"]   = proj_end.isoformat()
+
+            if duration_s > 0 and instrument_id not in (
+                "optimiser", "memory", "reporting", "knowledge", "unknown", ""
+            ):
+                entries.append(ProjectedScheduleEntry(
+                    instrument_id=instrument_id,
+                    instrument_name=instrument_name,
+                    start_time=proj_start.isoformat(),
+                    end_time=proj_end.isoformat(),
+                    step_id=step_id,
+                    label=step.get("label", step.get("kind", "")),
+                    is_projected=True,
+                ))
 
     return entries
 
@@ -264,7 +332,7 @@ def generate_plot(session, plot_code: str, out_file: Optional[str] = None) -> st
             timeout=_PLOT_TIMEOUT_SECONDS, env=env,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"Plot script failed:\n{result.stderr[:500]}")
+            raise RuntimeError(f"Plot script failed:\n{result.stderr[:800]}")
         if not os.path.exists(out_file):
             raise RuntimeError("Plot script ran but did not save output file")
         return out_file
@@ -311,7 +379,7 @@ sample_registry = data.get("sample_registry", [])
             timeout=_PLOT_TIMEOUT_SECONDS, env=env,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"Analysis script failed:\n{result.stderr[:500]}")
+            raise RuntimeError(f"Analysis script failed:\n{result.stderr[:800]}")
         return result.stdout.strip()
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Analysis script timed out after {_PLOT_TIMEOUT_SECONDS}s")
@@ -324,22 +392,22 @@ sample_registry = data.get("sample_registry", [])
 
 # ── Sample Registry operations ────────────────────────────────────────────────
 
-def prepare_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, Any]:
+def synthesise_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, Any]:
     params     = step.get("params", {})
     instrument = step.get("instrument", "")
 
     if not instrument:
         from app.core.tool_registry import TOOL_REGISTRY
-        synthesis = TOOL_REGISTRY.list_by_sub_category("synthesis")
-        instrument = synthesis[0].name if synthesis else "Unknown"
+        synthesis_instruments = TOOL_REGISTRY.list_by_sub_category("synthesis")
+        instrument = synthesis_instruments[0].name if synthesis_instruments else "Unknown"
 
     produces  = step.get("produces", "sample_id")
     time_cost = _get_instrument_time_cost(instrument)
 
     session.live_event_queue.append(ExecutionEvent(
-        event_type="sampler_start",
-        message=f"Preparing sample on {instrument}: " + ", ".join(f"{k}={v}" for k, v in params.items()),
-        equipment="sampler",
+        event_type="synthesiser_start",
+        message=f"Synthesising sample on {instrument}: " + ", ".join(f"{k}={v}" for k, v in params.items()),
+        equipment="synthesiser",
         category="execution",
         payload={"params": params, "instrument": instrument},
     ))
@@ -364,9 +432,9 @@ def prepare_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[st
         )
         session.sample_registry.append(failed_sample)
         session.live_event_queue.append(ExecutionEvent(
-            event_type="sampler_fail",
+            event_type="synthesiser_fail",
             message=f"Sample {sample_id} failed: {result.get('reason', 'defect')}",
-            equipment="sampler",
+            equipment="synthesiser",
             category="execution",
             payload={"sample_id": sample_id, "params": params},
         ))
@@ -383,16 +451,16 @@ def prepare_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[st
     context[produces] = sample_id
 
     session.live_event_queue.append(ExecutionEvent(
-        event_type="sampler_done",
-        message=f"Sample {sample_id} prepared and stored.",
-        equipment="sampler",
+        event_type="synthesiser_done",
+        message=f"Sample {sample_id} synthesised and stored.",
+        equipment="synthesiser",
         category="execution",
         payload={"sample_id": sample_id, "params": params},
     ))
     session.agent_state.messages.append({
         "role":    "assistant",
         "content": (
-            f"✅ **Sample `{sample_id}` prepared**\n\n"
+            f"✅ **Sample `{sample_id}` synthesised**\n\n"
             + "\n".join(f"- **{k}:** {v}" for k, v in params.items())
             + f"\n\nStored in lab inventory."
         ),
@@ -400,7 +468,7 @@ def prepare_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[st
     return {"status": "ok", "sample_id": sample_id, "params": params}
 
 
-def test_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, Any]:
+def characterise_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, Any]:
     sample_ref = _resolve_ref(step.get("sample_ref", ""), context)
     conditions = step.get("conditions", {})
     measures   = step.get("measures", "objective")
@@ -408,29 +476,29 @@ def test_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, 
 
     if not instrument:
         from app.core.tool_registry import TOOL_REGISTRY
-        characterisation = TOOL_REGISTRY.list_by_sub_category("characterisation")
-        instrument = characterisation[0].name if characterisation else "Unknown"
+        char_instruments = TOOL_REGISTRY.list_by_sub_category("characterisation")
+        instrument = char_instruments[0].name if char_instruments else "Unknown"
 
     sample = next((s for s in session.sample_registry if s.sample_id == sample_ref), None)
     if sample is None:
         session.live_event_queue.append(ExecutionEvent(
-            event_type="tester_fail",
+            event_type="characteriser_fail",
             message=f"Sample {sample_ref} not found.",
-            equipment="tester",
+            equipment="characteriser",
             category="execution",
             payload={"sample_ref": sample_ref},
         ))
         return {"status": "error", "message": f"Sample {sample_ref} not found"}
 
     if sample.status == "failed":
-        return {"status": "error", "message": f"Sample {sample_ref} failed preparation"}
+        return {"status": "error", "message": f"Sample {sample_ref} failed synthesis"}
 
     time_cost = _get_instrument_time_cost(instrument)
 
     session.live_event_queue.append(ExecutionEvent(
-        event_type="tester_start",
-        message=f"Testing {sample_ref} on {instrument}: " + ", ".join(f"{k}={v}" for k, v in conditions.items()),
-        equipment="tester",
+        event_type="characteriser_start",
+        message=f"Characterising {sample_ref} on {instrument}: " + ", ".join(f"{k}={v}" for k, v in conditions.items()),
+        equipment="characteriser",
         category="execution",
         payload={"sample_id": sample_ref, "conditions": conditions},
     ))
@@ -442,7 +510,6 @@ def test_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, 
     _log_resource(session, instrument, start_time, end_time)
 
     timestamp = _now()
-
     result = SampleResult(
         tested_by=instrument,
         conditions=conditions,
@@ -464,9 +531,9 @@ def test_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, 
     )
 
     session.live_event_queue.append(ExecutionEvent(
-        event_type="tester_done",
+        event_type="characteriser_done",
         message=f"{sample_ref}: {measures} = {value:.4f}",
-        equipment="tester",
+        equipment="characteriser",
         category="analysis",
         payload={"sample_id": sample_ref, "conditions": conditions, "outputs": {measures: value}},
     ))
@@ -481,7 +548,7 @@ def test_sample_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, 
     session.agent_state.messages.append({
         "role":    "assistant",
         "content": (
-            f"⚡ **`{sample_ref}` tested**"
+            f"⚡ **`{sample_ref}` characterised**"
             + (f" ({cond_str})" if conditions else "")
             + f"\n\n**{measures}:** {value:.4f}"
         ),
@@ -499,8 +566,8 @@ def list_samples_step(session) -> Dict[str, Any]:
 
     lines = [
         f"## Lab Sample Inventory ({len(samples)} samples)\n",
-        "| Sample ID | Parameters | Status | Prepared | Results |",
-        "|-----------|------------|--------|----------|---------|",
+        "| Sample ID | Parameters | Status | Synthesised | Results |",
+        "|-----------|------------|--------|-------------|---------|",
     ]
     for s in samples:
         params_str  = ", ".join(f"{k}={v}" for k, v in s.params.items())
@@ -515,58 +582,58 @@ def list_samples_step(session) -> Dict[str, Any]:
 
 # ── BO execution engine ───────────────────────────────────────────────────────
 
-def expand_optimise_condition_to_events(
+def run_optimise_condition(
     session,
     step:          dict,
     results_store: List[dict],
-) -> List[ExecutionEvent]:
-    # Safely extract all required fields with sensible fallbacks
-    condition_label  = step.get("condition_label") or "condition"
+) -> Dict[str, Any]:
+    """
+    Execute a closed-loop Bayesian optimisation campaign.
+    Runs synchronously, emitting live events to session.live_event_queue.
+    """
+    condition_label     = step.get("condition_label") or "condition"
     condition_value_raw = step.get("condition_value")
-    condition_value  = float(condition_value_raw) if condition_value_raw is not None else 0.0
-    free_params      = step.get("free_params") or []
-    objective_metric = step.get("objective_metric") or "objective"
-    n_calls          = int(step.get("n_calls") or session.optimiser_config.n_calls)
-    n_init           = int(step.get("n_initial_points") or session.optimiser_config.n_initial_points)
-    conditions       = {condition_label: condition_value}
+    condition_value     = float(condition_value_raw) if condition_value_raw is not None else 0.0
+    free_params         = step.get("free_params") or []
+    objective_metric    = step.get("objective_metric") or "objective"
+    n_calls             = int(step.get("n_calls") or session.optimiser_config.n_calls)
+    n_init              = int(step.get("n_initial_points") or session.optimiser_config.n_initial_points)
+    conditions          = {condition_label: condition_value}
+    optimiser_name      = session.optimiser_config.name
 
-    # Validate free_params — skip if empty
     if not free_params:
-        events = [ExecutionEvent(
+        session.live_event_queue.append(ExecutionEvent(
             event_type="optimiser_error",
             message="BO step has no free parameters defined. Please specify parameters to optimise.",
             equipment="optimiser",
             category="planning",
             payload={},
-        )]
+        ))
         session.agent_state.messages.append({
             "role": "assistant",
             "content": (
                 "⚠️ The optimisation step has no free parameters defined. "
-                "Please specify which parameters to optimise (e.g. active_material, porosity) "
-                "and their ranges in the workflow editor."
+                "Please specify which parameters to optimise and their ranges."
             ),
         })
-        return events
+        return {"status": "error", "message": "No free parameters defined"}
 
     from app.core.tool_registry import TOOL_REGISTRY
-    synthesis        = TOOL_REGISTRY.list_by_sub_category("synthesis")
-    characterisation = TOOL_REGISTRY.list_by_sub_category("characterisation")
-    synth_name       = synthesis[0].name        if synthesis        else "Synthesis"
-    char_name        = characterisation[0].name if characterisation else "Characterisation"
-    synth_time       = _get_instrument_time_cost(synth_name)
-    char_time        = _get_instrument_time_cost(char_name)
-
-    events: List[ExecutionEvent] = []
+    synthesis_instruments        = TOOL_REGISTRY.list_by_sub_category("synthesis")
+    characterisation_instruments = TOOL_REGISTRY.list_by_sub_category("characterisation")
+    synth_name = synthesis_instruments[0].name        if synthesis_instruments        else "Synthesis"
+    char_name  = characterisation_instruments[0].name if characterisation_instruments else "Characterisation"
+    synth_time = _get_instrument_time_cost(synth_name)
+    char_time  = _get_instrument_time_cost(char_name)
 
     param_summary = ", ".join(
         f"{p['name']} [{p['min']}–{p['max']} {p.get('unit','')}]"
         for p in free_params
     )
-    events.append(ExecutionEvent(
+    session.live_event_queue.append(ExecutionEvent(
         event_type="optimiser_start",
         message=(
-            f"Starting BO: {condition_label}={condition_value} | "
+            f"Starting BO ({optimiser_name}): {condition_label}={condition_value} | "
             f"Optimising: {param_summary} | Objective: {objective_metric}"
         ),
         equipment="optimiser",
@@ -574,15 +641,21 @@ def expand_optimise_condition_to_events(
         payload={"condition_label": condition_label, "condition_value": condition_value},
     ))
 
-    res = get_or_create_result_for_condition(results_store, condition_label, condition_value)
+    res = get_or_create_result_for_condition(
+        results_store,
+        condition_label,
+        condition_value,
+        optimiser_name=optimiser_name,
+    )
     if not res.get("param_names"):
         res["param_names"] = [p["name"] for p in free_params]
 
     from app.optimisers.catalogue import get_optimiser
-    opt    = get_optimiser(session.optimiser_config.name)
+    opt    = get_optimiser(optimiser_name)
     bounds = [(float(p["min"]), float(p["max"])) for p in free_params]
     opt.initialise(bounds=bounds, n_initial_points=min(n_init, n_calls), random_state=42)
 
+    step_id        = step.get("step_id", "")
     best_objective = res.get("best_objective")
     successes      = 0
     attempts       = 0
@@ -595,7 +668,7 @@ def expand_optimise_condition_to_events(
         attempts  += 1
 
         param_str = ", ".join(f"{k}={v:.3f}" for k, v in param_dict.items())
-        events.append(ExecutionEvent(
+        session.live_event_queue.append(ExecutionEvent(
             event_type="candidate_proposed",
             message=f"BO proposes: {param_str}",
             equipment="optimiser",
@@ -603,18 +676,18 @@ def expand_optimise_condition_to_events(
             payload={"params": param_dict},
         ))
 
-        events.append(ExecutionEvent(
-            event_type="sampler_start",
-            message=f"Preparing sample: {param_str}",
-            equipment="sampler",
+        session.live_event_queue.append(ExecutionEvent(
+            event_type="synthesiser_start",
+            message=f"Synthesising sample: {param_str}",
+            equipment="synthesiser",
             category="execution",
             payload={"params": param_dict},
         ))
 
-        start_time = _now()
+        start_time  = _now()
         _apply_instrument_delay(synth_name, synth_time)
         prep_result = _execute_preparation(synth_name, param_dict)
-        end_time = _now()
+        end_time    = _now()
         _log_resource(session, synth_name, start_time, end_time)
 
         if prep_result["status"] != "ok":
@@ -626,13 +699,13 @@ def expand_optimise_condition_to_events(
                 prepared_by=synth_name,
                 status="failed",
                 prepared_at=_now(),
-                failure_reason="Preparation defect",
-                notes=f"BO iteration @ {condition_label}={condition_value}",
+                failure_reason="Synthesis defect",
+                notes=f"BO iteration @ {condition_label}={condition_value} [{optimiser_name}]",
             ))
-            events.append(ExecutionEvent(
-                event_type="sampler_fail",
+            session.live_event_queue.append(ExecutionEvent(
+                event_type="synthesiser_fail",
                 message=f"Sample failed (p={prep_result['failure_probability']:.0%}). Retrying.",
-                equipment="sampler",
+                equipment="synthesiser",
                 category="execution",
                 payload={"params": param_dict},
             ))
@@ -645,22 +718,22 @@ def expand_optimise_condition_to_events(
             prepared_by=synth_name,
             status="prepared",
             prepared_at=_now(),
-            notes=f"BO iteration {successes + 1} @ {condition_label}={condition_value}",
+            notes=f"BO iter {successes + 1} @ {condition_label}={condition_value} [{optimiser_name}]",
         )
         session.sample_registry.append(bo_sample)
 
-        events.append(ExecutionEvent(
-            event_type="tester_start",
-            message=f"Testing {bo_sample_id} at {condition_label}={condition_value}...",
-            equipment="tester",
+        session.live_event_queue.append(ExecutionEvent(
+            event_type="characteriser_start",
+            message=f"Characterising {bo_sample_id} at {condition_label}={condition_value}...",
+            equipment="characteriser",
             category="execution",
             payload={"sample_id": bo_sample_id},
         ))
 
-        start_time = _now()
+        start_time      = _now()
         _apply_instrument_delay(char_name, char_time)
         objective_value = _execute_measurement(char_name, param_dict, conditions)
-        end_time = _now()
+        end_time        = _now()
         _log_resource(session, char_name, start_time, end_time)
 
         opt.update(suggestion, objective_value)
@@ -694,14 +767,23 @@ def expand_optimise_condition_to_events(
             res["best_objective"] = objective_value
             res["best_params"]    = dict(param_dict)
 
-        events.append(ExecutionEvent(
-            event_type="tester_done",
-            message=f"Result: {objective_value:.4f} {objective_metric}",
-            equipment="tester",
+        # Update live iteration counter for frontend progress display
+        if step_id:
+            session.bo_iteration_counts[step_id] = successes
+
+        session.live_event_queue.append(ExecutionEvent(
+            event_type="characteriser_done",
+            message=f"Iteration {successes}/{n_calls}: {objective_metric} = {objective_value:.4f}",
+            equipment="characteriser",
             category="analysis",
-            payload={"objective_value": objective_value, "params": param_dict},
+            payload={
+                "objective_value": objective_value,
+                "params":          param_dict,
+                "iteration":       successes,
+                "n_calls":         n_calls,
+            },
         ))
-        events.append(ExecutionEvent(
+        session.live_event_queue.append(ExecutionEvent(
             event_type="memory_update",
             message="Result recorded to database.",
             equipment="memory",
@@ -710,9 +792,12 @@ def expand_optimise_condition_to_events(
         ))
 
     best_str = f"{best_objective:.4f}" if best_objective is not None else "N/A"
-    events.append(ExecutionEvent(
+    session.live_event_queue.append(ExecutionEvent(
         event_type="optimiser_complete",
-        message=f"BO complete: {condition_label}={condition_value}. Best {objective_metric}: {best_str}",
+        message=(
+            f"BO complete ({optimiser_name}): {condition_label}={condition_value}. "
+            f"Best {objective_metric}: {best_str}"
+        ),
         equipment="optimiser",
         category="planning",
         payload={
@@ -720,9 +805,10 @@ def expand_optimise_condition_to_events(
             "condition_value":  condition_value,
             "best_objective":   best_objective,
             "objective_metric": objective_metric,
+            "optimiser_name":   optimiser_name,
         },
     ))
-    return events
+    return {"status": "ok", "best_objective": best_objective, "n_evaluations": successes}
 
 
 # ── Plan execution ────────────────────────────────────────────────────────────
@@ -827,19 +913,17 @@ def execute_plan_step(
             })
             return {"status": "error", "message": str(e)}
 
-    if kind == "prepare_sample":
-        return prepare_sample_step(session, step, dag_context)
+    if kind == "synthesise":
+        return synthesise_step(session, step, dag_context)
 
-    if kind == "test_sample":
-        return test_sample_step(session, step, dag_context)
+    if kind == "characterise":
+        return characterise_step(session, step, dag_context)
 
     if kind == "list_samples":
         return list_samples_step(session)
 
     if kind == "optimise_condition":
-        events = expand_optimise_condition_to_events(session, step, results_store)
-        session.live_event_queue.extend(events)
-        return {"status": "ok"}
+        return run_optimise_condition(session, step, results_store)
 
     if kind == "generate_plot":
         session.live_event_queue.append(ExecutionEvent(
@@ -925,6 +1009,11 @@ if not results_store:
     ax.text(0.5, 0.5, "No results yet", ha="center", va="center", transform=ax.transAxes)
     ax.set_axis_off()
 else:
+    # Group results by optimiser for comparison
+    optimisers = list(dict.fromkeys(r.get("optimiser_name", "unknown") for r in results_store))
+    conditions = sorted(list(dict.fromkeys(r.get("condition_value", 0) for r in results_store)))
+    cond_label = results_store[0].get("condition_label", "condition") if results_store else "condition"
+
     n_cols  = min(3, len(results_store) + 1)
     n_total = len(results_store) + 1
     n_rows  = math.ceil(n_total / n_cols)
@@ -933,15 +1022,17 @@ else:
 
     for i, res in enumerate(results_store[:len(axes) - 1]):
         ax = axes[i]
-        cond_label  = res.get("condition_label", "condition")
         cond_value  = res.get("condition_value", 0)
+        opt_name    = res.get("optimiser_name", "")
         param_names = res.get("param_names", ["param_1", "param_2"])
         x_label     = param_names[0] if param_names else "param_1"
         y_label     = param_names[1] if len(param_names) > 1 else "param_2"
         title       = f"{cond_label}={cond_value}"
+        if opt_name:
+            title += f"\\n[{opt_name}]"
 
         if not res.get("X"):
-            ax.set_title(title); ax.set_axis_off(); continue
+            ax.set_title(title, fontsize=8); ax.set_axis_off(); continue
 
         X = np.array(res["X"])
         y = np.array(res["y"])
@@ -956,7 +1047,7 @@ else:
         if bx is not None and by is not None:
             ax.scatter([bx], [by], facecolors="none", edgecolors="black", s=120, linewidths=1.5, label="Best")
             ax.legend(fontsize=7)
-        ax.set_title(title, fontsize=9)
+        ax.set_title(title, fontsize=8)
         ax.set_xlabel(x_label, fontsize=8)
         ax.set_ylabel(y_label, fontsize=8)
         fig.colorbar(sc, ax=ax).set_label("Objective", fontsize=7)
@@ -964,34 +1055,30 @@ else:
     for ax in axes[len(results_store):-1]:
         ax.set_visible(False)
 
+    # Final panel: optimality path — best objective vs condition, grouped by optimiser
     ax_path = axes[-1]
-    valid = [r for r in results_store if r.get("best_params")]
-    if valid:
-        valid.sort(key=lambda r: r.get("condition_value", 0))
-        param_names = valid[0].get("param_names", ["param_1", "param_2"])
-        x_label = param_names[0] if param_names else "param_1"
-        y_label = param_names[1] if len(param_names) > 1 else "param_2"
-        xs, ys, objs, cvs = [], [], [], []
-        for r in valid:
-            bp = r.get("best_params", {})
-            x  = bp.get(x_label)
-            y  = bp.get(y_label)
-            o  = r.get("best_objective", 0)
-            cv = r.get("condition_value", 0)
-            if x is not None and y is not None:
-                xs.append(float(x)); ys.append(float(y))
-                objs.append(float(o) if o else 0.0); cvs.append(cv)
-        if xs:
-            ax_path.plot(xs, ys, "-k", lw=1.5, alpha=0.6)
-            sc2 = ax_path.scatter(xs, ys, c=objs, cmap="viridis", s=60, edgecolors="black")
-            for x, y, cv in zip(xs, ys, cvs):
-                ax_path.text(x + 0.02 * (max(xs) - min(xs) + 1e-9), y, f"{cv}", fontsize=7)
-            ax_path.set_title("Optimal parameter path", fontsize=9)
-            ax_path.set_xlabel(x_label, fontsize=8)
-            ax_path.set_ylabel(y_label, fontsize=8)
-            fig.colorbar(sc2, ax=ax_path).set_label("Best Objective", fontsize=7)
+    colours = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed"]
+    has_data = False
+    for oi, opt_name in enumerate(optimisers):
+        opt_results = [r for r in results_store if r.get("optimiser_name", "") == opt_name and r.get("best_objective") is not None]
+        if not opt_results:
+            continue
+        opt_results.sort(key=lambda r: r.get("condition_value", 0))
+        xs  = [r.get("condition_value", 0) for r in opt_results]
+        ys  = [r.get("best_objective", 0)  for r in opt_results]
+        col = colours[oi % len(colours)]
+        ax_path.plot(xs, ys, "o-", color=col, linewidth=2, markersize=8,
+                     label=opt_name or "unknown", alpha=0.85)
+        has_data = True
+
+    if has_data:
+        ax_path.set_title("Optimality path", fontsize=9)
+        ax_path.set_xlabel(cond_label, fontsize=8)
+        ax_path.set_ylabel("Best Objective", fontsize=8)
+        ax_path.legend(fontsize=7)
+        ax_path.grid(True, alpha=0.3)
     else:
-        ax_path.set_title("Optimal parameter path")
+        ax_path.set_title("Optimality path")
         ax_path.text(0.5, 0.5, "No results yet", ha="center", va="center")
         ax_path.set_axis_off()
 """).strip()
@@ -1030,28 +1117,23 @@ def build_execution_plan_from_tool_calls(session, tool_calls: List[dict]) -> Lis
                 step["instrument_id"] = str(raw_id)
                 step.setdefault("status", "pending")
                 step.setdefault("dependencies", [])
-                
+
                 if step.get("kind") == "optimise_condition":
-                    # Ensure condition fields are present and valid
                     if not step.get("condition_label"):
                         step["condition_label"] = "condition"
-                    # condition_value must be a number — default to 0 only as last resort
                     if step.get("condition_value") is None:
                         step["condition_value"] = 0.0
                     else:
                         step["condition_value"] = float(step["condition_value"])
-                    # Ensure free_params is a list
                     if not step.get("free_params"):
                         step["free_params"] = []
-                    # Ensure objective_metric is set
                     if not step.get("objective_metric"):
                         step["objective_metric"] = "objective"
-                    # Ensure n_calls and n_initial_points are integers
                     if not step.get("n_calls"):
                         step["n_calls"] = session.optimiser_config.n_calls
                     if not step.get("n_initial_points"):
                         step["n_initial_points"] = session.optimiser_config.n_initial_points
-                
+
                 plan.append(step)
 
         elif name == "generate_plot":
@@ -1147,21 +1229,11 @@ def build_dynamic_timeline(session) -> List[dict]:
             "status": "active",
         })
 
-    for t in session.outstanding_tasks[:3]:
-        cond_label = t.get("condition_label", "condition")
-        cond_value = t.get("condition_value", "?")
-        completed  = t.get("completed_calls", 0)
-        remaining  = t.get("remaining_n_calls", 0)
-        items.append({
-            "label":  f"Queued: {cond_label}={cond_value} ({completed} done, {remaining} remaining)",
-            "status": "pending",
-        })
-
     if session.sample_registry:
-        n_prepared = sum(1 for s in session.sample_registry if s.status == "prepared")
-        n_tested   = sum(1 for s in session.sample_registry if s.status == "tested")
+        n_synthesised = sum(1 for s in session.sample_registry if s.status == "prepared")
+        n_tested      = sum(1 for s in session.sample_registry if s.status == "tested")
         items.append({
-            "label":  f"Samples: {n_prepared} prepared, {n_tested} tested",
+            "label":  f"Samples: {n_synthesised} synthesised, {n_tested} characterised",
             "status": "done",
         })
 

@@ -4,25 +4,23 @@ import { cn } from "@/lib/utils";
 import type { WorkflowStep, StepStatus } from "@/types";
 
 const KIND_ICON: Record<string, string> = {
-  prepare_sample:    "🧪",
-  test_sample:       "⚡",
+  synthesise:        "🧪",
+  characterise:      "⚡",
   optimise_condition:"📈",
   list_samples:      "📋",
   query_database:    "💾",
   generate_plot:     "📊",
-  plotter:           "📊",
   analyse_data:      "🔬",
   narration:         "💬",
 };
 
 const KIND_LABEL: Record<string, string> = {
-  prepare_sample:    "Prepare",
-  test_sample:       "Test",
+  synthesise:        "Synthesise",
+  characterise:      "Characterise",
   optimise_condition:"BO Campaign",
   list_samples:      "List Samples",
   query_database:    "Query DB",
   generate_plot:     "Plot",
-  plotter:           "Plot",
   analyse_data:      "Analyse",
   narration:         "Note",
 };
@@ -48,15 +46,17 @@ interface ConditionGroup {
   condition: string;
   steps:     WorkflowStep[];
   status:    StepStatus;
-  completed: number;
-  total:     number;
+  // BO iteration progress (from bo_iteration_counts, not step count)
+  currentIteration: number;
+  totalIterations:  number;
   projected_start_time?: string;
   projected_end_time?:   string;
 }
 
 function groupSteps(
-  plan:     WorkflowStep[],
-  statuses: Record<string, StepStatus>,
+  plan:             WorkflowStep[],
+  statuses:         Record<string, StepStatus>,
+  boIterationCounts: Record<string, number>,
 ): { groups: ConditionGroup[]; singles: WorkflowStep[] } {
   const boSteps    = plan.filter((s) => s.kind === "optimise_condition");
   const otherSteps = plan.filter((s) => s.kind !== "optimise_condition");
@@ -84,17 +84,20 @@ function groupSteps(
       ? "running"
       : "pending";
 
-    const completed = stepStatuses.filter((s) => s === "completed").length;
-
-    // Use projected timing from first step in group
     const firstStep = steps[0];
+    // Use actual BO iteration count from session state for live progress
+    const currentIteration = firstStep?.step_id
+      ? (boIterationCounts[firstStep.step_id] ?? 0)
+      : 0;
+    const totalIterations = firstStep?.n_calls ?? 20;
+
     groups.push({
       label:     firstStep?.label ?? key,
       condition: key,
       steps,
       status,
-      completed,
-      total: steps.length,
+      currentIteration,
+      totalIterations,
       projected_start_time: firstStep?.projected_start_time,
       projected_end_time:   firstStep?.projected_end_time,
     });
@@ -116,11 +119,12 @@ export function LiveWorkflowCanvas() {
     return [];
   }, [pending, state?.background_job_plan]);
 
-  const statuses: Record<string, StepStatus> = state?.step_statuses ?? {};
+  const statuses: Record<string, StepStatus>  = state?.step_statuses ?? {};
+  const boIterationCounts: Record<string, number> = state?.bo_iteration_counts ?? {};
 
   const { groups, singles } = useMemo(
-    () => groupSteps(rawPlan, statuses),
-    [rawPlan, statuses],
+    () => groupSteps(rawPlan, statuses, boIterationCounts),
+    [rawPlan, statuses, boIterationCounts],
   );
 
   const hasContent = groups.length > 0 || singles.length > 0;
@@ -135,8 +139,6 @@ export function LiveWorkflowCanvas() {
 
   return (
     <div className="w-full h-full overflow-y-auto p-3 space-y-2">
-
-      {/* Header */}
       <div className="flex items-center justify-between shrink-0">
         <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
           {pending ? "Proposed Workflow" : "Live Workflow"}
@@ -148,7 +150,6 @@ export function LiveWorkflowCanvas() {
         )}
       </div>
 
-      {/* Single steps */}
       {singles.map((step) => (
         <SingleStepNode
           key={step.step_id ?? step.kind}
@@ -157,7 +158,6 @@ export function LiveWorkflowCanvas() {
         />
       ))}
 
-      {/* BO condition groups */}
       {groups.map((group) => (
         <ConditionGroupNode
           key={group.condition}
@@ -187,12 +187,12 @@ function SingleStepNode({
         <div className="font-medium truncate">
           {step.label || KIND_LABEL[step.kind] || step.kind}
         </div>
-        {step.kind === "prepare_sample" && step.params && Object.keys(step.params).length > 0 && (
+        {step.kind === "synthesise" && step.params && Object.keys(step.params).length > 0 && (
           <div className="text-[10px] opacity-70 truncate">
             {Object.entries(step.params).map(([k, v]) => `${k}=${v}`).join(", ")}
           </div>
         )}
-        {step.kind === "test_sample" && (
+        {step.kind === "characterise" && (
           <div className="text-[10px] opacity-70 truncate">
             {step.sample_ref}
             {step.conditions && Object.keys(step.conditions).length > 0 && (
@@ -212,8 +212,8 @@ function SingleStepNode({
 }
 
 function ConditionGroupNode({ group }: { group: ConditionGroup }) {
-  const pct = group.total > 0
-    ? Math.round((group.completed / group.total) * 100)
+  const pct = group.totalIterations > 0
+    ? Math.round((group.currentIteration / group.totalIterations) * 100)
     : 0;
 
   return (
@@ -228,7 +228,7 @@ function ConditionGroupNode({ group }: { group: ConditionGroup }) {
             BO @ {group.condition}
           </div>
           <div className="text-[10px] opacity-70">
-            {group.completed}/{group.total} iterations
+            {group.currentIteration}/{group.totalIterations} iterations
           </div>
         </div>
         <span className="font-mono text-[11px] shrink-0">
@@ -236,7 +236,7 @@ function ConditionGroupNode({ group }: { group: ConditionGroup }) {
         </span>
       </div>
 
-      {group.total > 0 && (
+      {group.totalIterations > 0 && (
         <div className="px-3 pb-2">
           <div className="w-full h-1.5 bg-white/50 rounded-full overflow-hidden">
             <div

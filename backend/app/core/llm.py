@@ -1,15 +1,14 @@
 """
 LLM interface for MAESTRO.
 
-System prompt is built dynamically from:
-  - Lab identity and custom context (from lab_config.json)
-  - Registered instruments (from tool registry)
-  - Available optimisation libraries
-  - All library documents (RAG context)
-  - Experimental database schema
+System prompt is built dynamically from lab config, registered instruments,
+available optimisation libraries, library documents (RAG), and the DB schema.
+
+Model: gpt-4o-mini via GitHub Models (Azure inference endpoint).
+Context window: 128K tokens. GitHub free-tier enforces ~8K input tokens per
+request, so _MAX_PROMPT_CHARS is set conservatively to stay within that limit.
 """
 from __future__ import annotations
-import re
 
 from openai import OpenAI
 
@@ -25,11 +24,14 @@ client = OpenAI(
     api_key=GITHUB_TOKEN,
 )
 
-_MAX_PROMPT_CHARS = 16_000
+# GitHub Models free tier: ~8K input tokens per request (~4 chars/token).
+# Reserve ~2K tokens for system prompt + dynamic context + response headroom.
+_MAX_PROMPT_CHARS  = 24_000
+_MAX_OUTPUT_TOKENS = 4_000
 
 _INSTRUMENT_ACTIONS = {
-    "prepare_sample",
-    "test_sample",
+    "synthesise",
+    "characterise",
     "run_extracted_campaign",
 }
 
@@ -41,6 +43,8 @@ _NON_INSTRUMENT_ACTIONS = {
     "extract_and_check_feasibility",
 }
 
+_SYSTEM_PROMPT_CONTENT = ""
+
 
 def _total_chars(messages: list) -> int:
     return sum(len(str(m.get("content", ""))) for m in messages)
@@ -49,7 +53,7 @@ def _total_chars(messages: list) -> int:
 def trim_messages_to_budget(
     messages:    list,
     max_chars:   int = _MAX_PROMPT_CHARS,
-    keep_last_n: int = 8,
+    keep_last_n: int = 12,
 ) -> list:
     if not messages:
         return messages
@@ -75,48 +79,49 @@ def trim_messages_to_budget(
 
 _BASE_SYSTEM_PROMPT = """\
 You are MAESTRO, an agentic orchestrator for a self-driving scientific laboratory.
-You help scientists design, execute, and analyse experimental campaigns.
+Help scientists design, execute, and analyse experimental campaigns.
 
-CORE PRINCIPLES:
-- Any action that uses a physical instrument requires a workflow plan and user approval before execution.
-- Non-instrument actions (analysis, plotting, database queries, document questions) run immediately.
-- All workflows go through plan_workflow and are shown to the user for review before execution.
-- You have access to all documents in the knowledge library — search across all loaded documents.
-- Use the optimisation libraries in your context to select the most appropriate algorithm and propose suitable hyperparameters based on task complexity.
-- Be aware of safety constraints or operating limits mentioned in equipment manuals.
+RULES:
+- Instrument actions (synthesise, characterise, optimise_condition) → call plan_workflow first; await user approval before execution.
+- Non-instrument actions (analysis, plotting, database queries, document questions) → execute immediately without a plan.
+- Paper reproduction → call extract_and_check_feasibility, then present as a workflow plan.
 
-WORKFLOW:
-1. Instrument tasks → call plan_workflow → user approves → execute
-2. Document questions → answer directly from context
-3. Analysis/plotting → call generate_plot or analyse_data immediately
-4. Database queries → call query_database immediately
-5. Paper reproduction → call extract_and_check_feasibility, then present as a workflow plan
+WORKFLOW STEP KINDS:
+- synthesise: prepare a physical sample using a synthesis instrument
+- characterise: measure a prepared sample using a characterisation instrument
+- optimise_condition: closed-loop Bayesian optimisation campaign
+- generate_plot, analyse_data, query_database, list_samples: immediate, no approval needed
 
-OPTIMISE_CONDITION STEP — ALL FIELDS REQUIRED:
-- condition_label: name of the fixed operating condition (e.g. "power_W", "temperature_C")
-- condition_value: numeric value — NEVER 0 unless 0 is the actual value (e.g. 90, 150)
-- condition_unit: unit string (e.g. "W", "°C")
-- free_params: list of {name, min, max, unit} — parameters BO searches over
-- objective_metric: output to maximise — must match a registered instrument output name
-- n_calls: total BO evaluations (integer)
-- n_initial_points: random evaluations before GP fitting (integer)
+OPTIMISE_CONDITION — ALL FIELDS REQUIRED:
+  condition_label: name of the fixed operating condition (e.g. "power_W")
+  condition_value: numeric value — NEVER 0 unless 0 is genuinely correct
+  condition_unit: unit string (e.g. "W")
+  free_params: [{name, min, max, unit}] — parameters BO searches over
+  objective_metric: output to maximise — must match a registered instrument output
+  n_calls: total BO evaluations (integer)
+  n_initial_points: random evaluations before GP fitting (integer)
 
-TEST_SAMPLE STEP — REQUIRED FIELDS:
-When creating a test_sample step, always include:
-- sample_ref: the sample ID (e.g. "S-001") or "{{sample_id}}" if referencing a preceding prepare step
-- conditions: dict of test conditions (e.g. {"power_W": 100}) — NEVER leave empty if the instrument requires conditions
-- measures: the output metric name (e.g. "specific_energy")
+CHARACTERISE — REQUIRED FIELDS:
+  sample_ref: sample ID (e.g. "S-001") or "{{sample_id}}" if referencing a preceding synthesise step
+  conditions: dict of test conditions (e.g. {"power_W": 100})
+  measures: the output metric name (e.g. "specific_energy")
 
-SAMPLE REGISTRY:
-- Every prepared sample gets a unique ID (e.g. S-001)
-- Samples persist across the session and can be tested multiple times
+RESULTS STORE STRUCTURE (for generate_plot and analyse_data):
+  results_store is a list of dicts. Each dict has:
+    condition_label (str), condition_value (float),
+    param_names (list[str]), X (list of param vectors e.g. [[93.1, 35.2], ...]),
+    y (list of objective floats e.g. [104.4, 98.5, ...]),
+    best_params (dict e.g. {"active_material": 96.6, "porosity": 30.2}),
+    best_objective (float or None), failed_samples (int)
+  Access objective values as: results_store[0]["y"]
+  Access parameter vectors as: results_store[0]["X"]
+  Access best result as: results_store[0]["best_objective"]
 
-IMPORTANT:
-- Never execute instrument actions without user approval via the workflow plan
-- Speak as a scientific collaborator — precise, concise, honest about uncertainty
+SAMPLE IDs: Each synthesised sample gets a unique ID (S-001, S-002, ...) persisted across the session.
+OPTIMISERS: Select the most appropriate algorithm from the available optimisation libraries.
+SAFETY: Respect any operating limits or safety constraints mentioned in equipment manuals or lab context.
+STYLE: Be precise, concise, and honest about uncertainty. Speak as a scientific collaborator.
 """
-
-_SYSTEM_PROMPT_CONTENT = _BASE_SYSTEM_PROMPT
 
 
 def build_dynamic_system_prompt() -> str:
@@ -128,7 +133,7 @@ def build_dynamic_system_prompt() -> str:
 
     opt_context = ""
     if settings.optimisation_library:
-        enabled = [l for l in settings.optimisation_library if l.enabled]
+        enabled = [lib for lib in settings.optimisation_library if lib.enabled]
         if enabled:
             lines = ["\nAVAILABLE OPTIMISATION LIBRARIES:\n"]
             for lib in enabled:
@@ -140,7 +145,7 @@ def build_dynamic_system_prompt() -> str:
     if settings.system_prompt_extension.strip():
         extension = f"\n\nLAB CONTEXT:\n{settings.system_prompt_extension.strip()}"
 
-    library_context = get_all_library_context(max_chars_per_doc=1500)
+    library_context = get_all_library_context(max_chars_per_doc=800)
     if library_context:
         library_context = f"\n\n{library_context}"
 
@@ -149,8 +154,7 @@ def build_dynamic_system_prompt() -> str:
         + extension
         + opt_context
         + library_context
-        + "\n\n"
-        + "REGISTERED INSTRUMENTS:\n"
+        + "\n\nREGISTERED INSTRUMENTS:\n"
         + TOOL_REGISTRY.to_llm_context()
         + "\nDATABASE SCHEMA:\n"
         + DB_SCHEMA
@@ -162,7 +166,7 @@ def call_llm(messages: list, tools=None, tool_choice: str = "auto"):
     kwargs: dict = {
         "model":       MODEL_NAME,
         "messages":    safe_messages,
-        "max_tokens":  1200,
+        "max_tokens":  _MAX_OUTPUT_TOKENS,
         "temperature": 0.2,
     }
     if tools is not None:
@@ -180,9 +184,9 @@ def build_tools_schema() -> list:
                 "name": "plan_workflow",
                 "description": (
                     "Propose a workflow plan for any task that involves using instruments. "
-                    "This includes single-step tasks (prepare one sample), multi-step tasks "
-                    "(prepare then test), optimisation campaigns, and paper reproduction. "
-                    "The plan is shown to the user for review and approval before execution."
+                    "Includes single-step tasks, multi-step tasks, optimisation campaigns, "
+                    "and paper reproduction. The plan is shown to the user for review and "
+                    "approval before execution."
                 ),
                 "parameters": {
                     "type": "object",
@@ -199,7 +203,7 @@ def build_tools_schema() -> list:
                                     "kind": {
                                         "type": "string",
                                         "enum": [
-                                            "prepare_sample", "test_sample",
+                                            "synthesise", "characterise",
                                             "optimise_condition", "list_samples",
                                             "query_database", "generate_plot",
                                             "analyse_data",
@@ -279,7 +283,17 @@ def build_tools_schema() -> list:
                 "description": (
                     "Generate a matplotlib figure from experimental data. "
                     "Write pure matplotlib code — no imports, no plt.savefig(). "
-                    "Available: results_store (list of result dicts), sample_registry."
+                    "Available variables:\n"
+                    "  results_store: list of dicts, each with keys:\n"
+                    "    condition_label (str), condition_value (float),\n"
+                    "    param_names (list[str]),\n"
+                    "    X (list of param vectors e.g. [[93.1, 35.2], ...]),\n"
+                    "    y (list of objective floats e.g. [104.4, 98.5, ...]),\n"
+                    "    best_params (dict), best_objective (float or None),\n"
+                    "    failed_samples (int)\n"
+                    "  sample_registry: list of sample dicts\n"
+                    "Access values as: results_store[0]['y'], results_store[0]['X'],\n"
+                    "  results_store[0]['best_objective'], results_store[0]['param_names']"
                 ),
                 "parameters": {
                     "type": "object",
@@ -297,7 +311,14 @@ def build_tools_schema() -> list:
                 "name": "analyse_data",
                 "description": (
                     "Run statistical analysis using numpy/scipy. "
-                    "Print results to stdout — they appear in the chat."
+                    "Print results to stdout — they appear in the chat.\n"
+                    "Available variables:\n"
+                    "  results_store: list of dicts with keys:\n"
+                    "    condition_label, condition_value, param_names,\n"
+                    "    X (param vectors), y (objective values),\n"
+                    "    best_params, best_objective, failed_samples\n"
+                    "  sample_registry: list of sample dicts\n"
+                    "Example: y_vals = results_store[0]['y'] if results_store else []"
                 ),
                 "parameters": {
                     "type": "object",
@@ -336,11 +357,11 @@ def build_lab_context_message(session) -> dict:
     from datetime import datetime
     import re
 
-    now       = datetime.now()
-    hour      = now.hour
-    time_str  = now.strftime("%A, %d %B %Y %H:%M:%S")
+    now      = datetime.now()
+    hour     = now.hour
+    time_str = now.strftime("%A, %d %B %Y %H:%M:%S")
     is_office = 9 <= hour < 17
-    office_note = "office hours" if is_office else "outside office hours (09:00–17:00)"
+    office_note = "office hours" if is_office else "outside office hours"
 
     total_evals  = sum(len(r.get("X", [])) for r in session.agent_state.results_store)
     tool_summary = f"{len(TOOL_REGISTRY.list_all())} instruments registered"
@@ -360,62 +381,48 @@ def build_lab_context_message(session) -> dict:
         try:
             doc = get_document(session.active_document_id)
 
-            table_summary = ""
-            if doc.tables:
-                table_lines = [f"\nTables ({len(doc.tables)}):"]
-                for tbl in doc.tables[:5]:
-                    cap = tbl.caption[:100] if tbl.caption else "No caption"
-                    html_text = re.sub(r'<[^>]+>', ' ', tbl.html)[:300].strip()
-                    html_text = ' '.join(html_text.split())
-                    table_lines.append(f"  {cap}")
-                    if html_text:
-                        table_lines.append(f"  Content: {html_text}")
-                table_summary = "\n".join(table_lines)
-
-            figure_lines: list[str] = []
-            if doc.figures:
-                figure_lines = [f"\nFigures ({len(doc.figures)} extracted):"]
-                for fig in doc.figures:
-                    cap = fig.caption[:80] if fig.caption else "No caption"
-                    figure_lines.append(
-                        f"  ID={fig.figure_id} | Page {fig.page_idx + 1} | {cap}"
-                    )
-            else:
-                figure_lines = ["\nNo figures extracted from this paper."]
-
-            raw_start = doc.raw_text[:1500] if doc.raw_text else ""
-            date_snippet = ""
-            if doc.raw_text:
-                for pattern in [
-                    r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}',
-                    r'Published[:\s]+\S+\s+\d{1,2},?\s+\d{4}',
-                    r'(?:doi|DOI|https://doi)[:\s/].{5,80}',
-                    r'©\s*\d{4}',
-                ]:
-                    match = re.search(pattern, doc.raw_text[:15000])
-                    if match:
-                        start = max(0, match.start() - 80)
-                        end   = min(len(doc.raw_text), match.end() + 150)
-                        date_snippet = ' '.join(doc.raw_text[start:end].split())
-                        break
+            meta_lines = []
+            if doc.authors:
+                meta_lines.append(f"Authors: {', '.join(doc.authors)}")
+            if doc.year:
+                meta_lines.append(f"Year: {doc.year}")
+            if doc.doi:
+                meta_lines.append(f"DOI: {doc.doi}")
+            if doc.journal:
+                meta_lines.append(f"Journal: {doc.journal}")
 
             section_toc = ""
             if doc.sections:
                 toc_lines = [f"\nSections ({len(doc.sections)}):"]
-                for i, s in enumerate(doc.sections[:40]):
+                for i, s in enumerate(doc.sections[:30]):
                     indent  = "  " * min(s.level - 1, 3)
-                    preview = f" — {s.content[:100].strip()}..." if s.content and len(s.content) > 20 else ""
+                    preview = f" — {s.content[:80].strip()}..." if s.content and len(s.content) > 20 else ""
                     toc_lines.append(f"  {indent}{i + 1}. {s.heading}{preview}")
                 section_toc = "\n".join(toc_lines)
+
+            table_summary = ""
+            if doc.tables:
+                table_lines = [f"\nTables ({len(doc.tables)}):"]
+                for tbl in doc.tables[:4]:
+                    cap = tbl.caption[:80] if tbl.caption else "No caption"
+                    table_lines.append(f"  {cap}")
+                table_summary = "\n".join(table_lines)
+
+            figure_summary = ""
+            if doc.figures:
+                figure_lines = [f"\nFigures ({len(doc.figures)}):"]
+                for fig in doc.figures[:6]:
+                    cap = fig.caption[:60] if fig.caption else "No caption"
+                    figure_lines.append(f"  ID={fig.figure_id} | Page {fig.page_idx + 1} | {cap}")
+                figure_summary = "\n".join(figure_lines)
 
             doc_context_text = (
                 f"\nACTIVE DOCUMENT: {doc.filename}"
                 f"\nTitle: {doc.title or 'Unknown'}"
-                f"\nSections: {len(doc.sections)} | Figures: {len(doc.figures)} | Tables: {len(doc.tables)}"
-                f"{table_summary}"
-                + "\n".join(figure_lines)
-                + (f"\nDocument start:\n{raw_start}" if raw_start else "")
-                + (f"\nPublication metadata: {date_snippet}" if date_snippet else "")
+                + ("\n" + "\n".join(meta_lines) if meta_lines else "")
+                + f"\nSections: {len(doc.sections)} | Figures: {len(doc.figures)} | Tables: {len(doc.tables)}"
+                + table_summary
+                + figure_summary
                 + section_toc
             )
         except Exception:
@@ -491,6 +498,7 @@ def llm_plan(session) -> dict:
         "explain", "summarise", "summarize", "describe", "tell me about",
         "who", "when", "reference", "citation", "finding", "discuss",
         "manual", "instrument", "equipment", "safety", "hazard", "limit",
+        "doi", "journal", "volume", "issue",
     }
     is_doc_query = (
         session.active_document_id is not None

@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import {
   ReactFlow, Background, Controls, MiniMap,
   BackgroundVariant, useNodesState, useEdgesState,
@@ -16,13 +16,13 @@ function makeNodes(eq: EquipmentStatus): Node[] {
     id: string; label: string; type: keyof EquipmentStatus | "llm";
     x: number; y: number; desc: string; extra?: Partial<EquipmentNodeData>;
   }> = [
-    { id: "maestro",   label: "MAESTRO",   type: "llm",       x: 300, y: 200, desc: "LLM Orchestrator"     },
-    { id: "knowledge", label: "Knowledge", type: "knowledge", x:  60, y:  50, desc: "RAG + Document Store"  },
-    { id: "optimiser", label: "Optimiser", type: "optimiser", x: 540, y:  50, desc: "Bayesian / LLM-BO"    },
-    { id: "sampler",   label: "Sampler",   type: "sampler",   x:  60, y: 360, desc: "Sample Preparation",   extra: { failProb: 0.06, timeCost: 2 } },
-    { id: "tester",    label: "Tester",    type: "tester",    x: 540, y: 360, desc: "Characterisation",     extra: { noiseSigma: 0.5, timeCost: 5 } },
-    { id: "memory",    label: "Memory",    type: "memory",    x: 300, y: 420, desc: "Experiment Store"      },
-    { id: "reporting", label: "Reporting", type: "reporting", x: 300, y:  10, desc: "Figure Generation"     },
+    { id: "maestro",       label: "MAESTRO",       type: "llm",           x: 300, y: 200, desc: "LLM Orchestrator"      },
+    { id: "knowledge",     label: "Knowledge",     type: "knowledge",     x:  60, y:  50, desc: "RAG + Document Store"  },
+    { id: "optimiser",     label: "Optimiser",     type: "optimiser",     x: 540, y:  50, desc: "Bayesian / LLM-BO"    },
+    { id: "synthesiser",   label: "Synthesiser",   type: "synthesiser",   x:  60, y: 360, desc: "Sample Synthesis",     extra: { failProb: 0.06, timeCostS: 5 } },
+    { id: "characteriser", label: "Characteriser", type: "characteriser", x: 540, y: 360, desc: "Characterisation",     extra: { noiseSigma: 0.5, timeCostS: 8 } },
+    { id: "memory",        label: "Memory",        type: "memory",        x: 300, y: 420, desc: "Experiment Store"      },
+    { id: "reporting",     label: "Reporting",     type: "reporting",     x: 300, y:  10, desc: "Figure Generation"     },
   ];
 
   return defs.map(({ id, label, type, x, y, desc, extra }) => {
@@ -44,21 +44,21 @@ function makeNodes(eq: EquipmentStatus): Node[] {
 }
 
 const INITIAL_EDGES: Edge[] = [
-  { id: "e-m-k",   source: "maestro",   target: "knowledge" },
-  { id: "e-m-o",   source: "maestro",   target: "optimiser" },
-  { id: "e-m-s",   source: "maestro",   target: "sampler"   },
-  { id: "e-m-t",   source: "maestro",   target: "tester"    },
-  { id: "e-m-mem", source: "maestro",   target: "memory"    },
-  { id: "e-m-r",   source: "maestro",   target: "reporting" },
-  { id: "e-s-t",   source: "sampler",   target: "tester"    },
-  { id: "e-t-mem", source: "tester",    target: "memory"    },
+  { id: "e-m-k",   source: "maestro",       target: "knowledge"     },
+  { id: "e-m-o",   source: "maestro",       target: "optimiser"     },
+  { id: "e-m-s",   source: "maestro",       target: "synthesiser"   },
+  { id: "e-m-t",   source: "maestro",       target: "characteriser" },
+  { id: "e-m-mem", source: "maestro",       target: "memory"        },
+  { id: "e-m-r",   source: "maestro",       target: "reporting"     },
+  { id: "e-s-t",   source: "synthesiser",   target: "characteriser" },
+  { id: "e-t-mem", source: "characteriser", target: "memory"        },
 ];
 
 function LabCanvasInner() {
   const state = useMaestroStore((s) => s.state);
   const eq: EquipmentStatus = state?.equipment_status ?? {
-    llm: false, optimiser: false, sampler: false,
-    tester: false, memory: false, knowledge: false, reporting: false,
+    llm: false, optimiser: false, synthesiser: false,
+    characteriser: false, memory: false, knowledge: false, reporting: false,
   };
 
   const [nodes, setNodes, onNodesChange] = useNodesState(makeNodes(eq));
@@ -82,7 +82,7 @@ function LabCanvasInner() {
         };
       })
     );
-  }, [eq.llm, eq.optimiser, eq.sampler, eq.tester, eq.memory, eq.knowledge, eq.reporting]);
+  }, [eq.llm, eq.optimiser, eq.synthesiser, eq.characteriser, eq.memory, eq.knowledge, eq.reporting]);
 
   const onConnect = useCallback(
     (params: Connection) => setEdges((eds) => addEdge(params, eds)),

@@ -1,11 +1,10 @@
 """
 Document ingestion using MinerU.
 
-MinerU is required for document parsing. Install it with:
-  pip install mineru
-
 MinerU provides structured extraction of sections, figures, and tables
-from scientific PDFs, enabling accurate RAG and campaign extraction.
+from scientific PDFs, enabling RAG and campaign extraction.
+
+Install MinerU with: pip install mineru
 """
 from __future__ import annotations
 
@@ -26,6 +25,72 @@ _MEDIA_DIR = os.path.join(tempfile.gettempdir(), "maestro_media")
 os.makedirs(_MEDIA_DIR, exist_ok=True)
 
 
+def _extract_paper_metadata(markdown: str) -> dict:
+    """
+    Extract authors, year, DOI, and journal from the raw markdown text.
+    Searches the first ~8000 characters where metadata typically appears.
+    """
+    metadata: dict = {}
+    search_text = markdown[:8000]
+
+    # DOI
+    doi_match = re.search(
+        r'(?:doi\.org/|doi[:\s/]+)(10\.\d{4,}/[^\s\)\]>,"\']+)',
+        search_text, re.IGNORECASE
+    )
+    if doi_match:
+        metadata["doi"] = doi_match.group(1).rstrip(".")
+
+    # Year — prefer 4-digit year in 2000–2030 range near publication keywords
+    year_match = re.search(
+        r'(?:published|received|accepted|©|copyright|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+)?\b(20[0-2]\d|19[89]\d)\b',
+        search_text, re.IGNORECASE
+    )
+    if year_match:
+        metadata["year"] = int(year_match.group(1))
+    else:
+        # Fallback: first 4-digit year in range
+        fallback = re.search(r'\b(20[0-2]\d|19[89]\d)\b', search_text)
+        if fallback:
+            metadata["year"] = int(fallback.group(1))
+
+    # Journal — look for common journal name patterns
+    journal_patterns = [
+        r'(?:journal of|nature|science|physical review|advanced|ACS|RSC|Elsevier|Wiley)[^\n]{3,60}',
+        r'(?:published in|journal)[:\s]+([^\n]{5,80})',
+    ]
+    for pat in journal_patterns:
+        m = re.search(pat, search_text, re.IGNORECASE)
+        if m:
+            candidate = m.group(0).strip()[:100]
+            if len(candidate) > 5:
+                metadata["journal"] = candidate
+                break
+
+    # Authors — heuristic: look for lines with multiple capitalised names
+    # Typical patterns: "John Smith, Jane Doe, ..." or "Smith J., Doe J.A., ..."
+    author_patterns = [
+        # "Firstname Lastname, Firstname Lastname" style
+        r'^([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,\s*[A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+){1,})',
+        # "Lastname, F., Lastname, F." style
+        r'^([A-Z][a-z]+,\s+[A-Z]\.(?:,\s+[A-Z][a-z]+,\s+[A-Z]\.){1,})',
+        # After "Authors:" or "By:"
+        r'(?:authors?|by)[:\s]+([^\n]{10,200})',
+    ]
+    for pat in author_patterns:
+        m = re.search(pat, search_text[:4000], re.MULTILINE | re.IGNORECASE)
+        if m:
+            raw = m.group(1).strip()
+            # Split on comma or semicolon or " and "
+            parts = re.split(r'[;]|,\s*(?:and\s+)?|\s+and\s+', raw)
+            authors = [p.strip() for p in parts if len(p.strip()) > 2 and len(p.strip()) < 60]
+            if len(authors) >= 2:
+                metadata["authors"] = authors[:20]
+                break
+
+    return metadata
+
+
 def _extract_with_mineru(
     file_bytes: bytes,
 ) -> Tuple[str, List[SectionModel], List[FigureModel], List[TableModel]]:
@@ -39,12 +104,17 @@ def _extract_with_mineru(
         with open(pdf_path, "wb") as f:
             f.write(file_bytes)
 
-        result = subprocess.run(
-            ["mineru", "-p", pdf_path, "-o", output_dir, "-b", "pipeline"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        try:
+            result = subprocess.run(
+                ["mineru", "-p", pdf_path, "-o", output_dir, "-b", "pipeline"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                "MinerU binary not found. Install with: pip install mineru"
+            )
 
         if result.returncode != 0:
             raise RuntimeError(f"MinerU failed: {result.stderr[:500]}")
@@ -218,7 +288,7 @@ def _parse_mineru_output(
         page_idx  = item.get("page_idx", 0)
 
         if item_type in ("image", "figure"):
-            caption     = _extract_caption(item)
+            caption      = _extract_caption(item)
             img_path_rel = item.get("img_path", "")
             img_fname    = os.path.basename(img_path_rel)
             img_abs      = img_map.get(img_fname, "")
@@ -278,6 +348,7 @@ def create_document(filename: str, file_bytes: bytes) -> DocumentModel:
             "Ensure MinerU is installed: pip install mineru"
         )
 
+    # Extract paper title
     title = filename
     for s in sections:
         if s.level == 1 and len(s.heading) > 5:
@@ -286,6 +357,9 @@ def create_document(filename: str, file_bytes: bytes) -> DocumentModel:
     if title == filename:
         lines = [l.strip() for l in markdown.splitlines() if l.strip()]
         title = next((l[:300] for l in lines[:15] if len(l) > 20), filename)
+
+    # Extract paper metadata (authors, year, DOI, journal)
+    metadata = _extract_paper_metadata(markdown)
 
     doc = DocumentModel(
         document_id=str(uuid.uuid4()),
@@ -297,6 +371,10 @@ def create_document(filename: str, file_bytes: bytes) -> DocumentModel:
         sections=sections,
         figures=figures,
         tables=tables,
+        authors=metadata.get("authors", []),
+        year=metadata.get("year"),
+        doi=metadata.get("doi"),
+        journal=metadata.get("journal"),
     )
     DOCUMENTS[doc.document_id] = doc
     return doc
@@ -385,38 +463,53 @@ def _retrieve_from_pages(
 
 def get_document_summary_chunk(document_id: str, max_chars: int = 3000) -> str:
     doc = get_document(document_id)
+
+    # Build metadata header
+    meta_lines = []
+    if doc.authors:
+        meta_lines.append(f"Authors: {', '.join(doc.authors)}")
+    if doc.year:
+        meta_lines.append(f"Year: {doc.year}")
+    if doc.doi:
+        meta_lines.append(f"DOI: {doc.doi}")
+    if doc.journal:
+        meta_lines.append(f"Journal: {doc.journal}")
+    meta_block = ("\n".join(meta_lines) + "\n\n") if meta_lines else ""
+
+    remaining = max_chars - len(meta_block)
+
     if doc.sections:
         priority = {"abstract", "introduction", "overview", "summary", "background"}
         chunk    = ""
         for s in doc.sections[:6]:
             if any(kw in s.heading.lower() for kw in priority):
                 chunk += f"## {s.heading}\n{s.content}\n\n"
-                if len(chunk) >= max_chars:
+                if len(chunk) >= remaining:
                     break
         if not chunk:
             for s in doc.sections[:3]:
                 chunk += f"## {s.heading}\n{s.content}\n\n"
-                if len(chunk) >= max_chars:
+                if len(chunk) >= remaining:
                     break
-        return chunk[:max_chars].strip()
+        return (meta_block + chunk)[:max_chars].strip()
+
     chunk = ""
     for page in doc.pages[:3]:
-        if len(chunk) + len(page) > max_chars:
-            chunk += page[:max_chars - len(chunk)]
+        if len(chunk) + len(page) > remaining:
+            chunk += page[:remaining - len(chunk)]
             break
         chunk += page + "\n\n"
-    return chunk.strip()
+    return (meta_block + chunk).strip()
 
 
-def get_all_library_context(max_chars_per_doc: int = 2000) -> str:
+def get_all_library_context(max_chars_per_doc: int = 800) -> str:
     """
-    Build a compact context string from all loaded documents.
-    Used to give the agent awareness of all library documents,
-    including equipment manuals that may contain safety constraints.
+    Build a compact context string from all loaded documents for the system prompt.
+    Includes metadata (authors, year, DOI) to support bibliographic queries.
     """
     if not DOCUMENTS:
         return ""
-    lines = ["KNOWLEDGE LIBRARY (documents available for reference):\n"]
+    lines = ["KNOWLEDGE LIBRARY:\n"]
     for doc in DOCUMENTS.values():
         chunk = get_document_summary_chunk(doc.document_id, max_chars=max_chars_per_doc)
         lines.append(f"--- {doc.title or doc.filename} ---")

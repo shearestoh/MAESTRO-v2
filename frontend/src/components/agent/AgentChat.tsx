@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect } from "react";
 import { useMaestroStore } from "@/store/maestroStore";
-import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   Send, CheckCircle2, XCircle,
@@ -11,12 +10,12 @@ import ReactMarkdown from "react-markdown";
 import type { Message, ToolCall, WorkflowPlan, WorkflowStep } from "@/types";
 
 export function AgentChat() {
-  const sessionId    = useMaestroStore((s) => s.sessionId);
-  const state        = useMaestroStore((s) => s.state);
-  const isLoading    = useMaestroStore((s) => s.isLoading);
-  const sendMessage  = useMaestroStore((s) => s.sendMessage);
-  const confirm      = useMaestroStore((s) => s.confirm);
-  const executePlan  = useMaestroStore((s) => s.executePlan);
+  const sessionId   = useMaestroStore((s) => s.sessionId);
+  const state       = useMaestroStore((s) => s.state);
+  const isLoading   = useMaestroStore((s) => s.isLoading);
+  const sendMessage = useMaestroStore((s) => s.sendMessage);
+  const confirm     = useMaestroStore((s) => s.confirm);
+  const executePlan = useMaestroStore((s) => s.executePlan);
 
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -153,7 +152,6 @@ function UserAvatar() {
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user";
 
-  // Skip assistant messages that have no content (only tool calls)
   if (!isUser && !message.content?.trim()) {
     return null;
   }
@@ -282,8 +280,8 @@ function WorkflowPlanEditor({
   };
 
   const stepKindIcon: Record<string, string> = {
-    prepare_sample:    "🧪",
-    test_sample:       "⚡",
+    synthesise:        "🧪",
+    characterise:      "⚡",
     optimise_condition:"📈",
     list_samples:      "📋",
     query_database:    "💾",
@@ -293,8 +291,8 @@ function WorkflowPlanEditor({
   };
 
   const stepKindLabel: Record<string, string> = {
-    prepare_sample:    "Prepare Sample",
-    test_sample:       "Test Sample",
+    synthesise:        "Synthesise",
+    characterise:      "Characterise",
     optimise_condition:"BO Optimisation",
     list_samples:      "List Samples",
     query_database:    "Query Database",
@@ -366,10 +364,12 @@ function WorkflowPlanEditor({
 
             {expandedSteps.has(step.step_id) && (
               <div className="px-3 py-3 space-y-3 bg-white">
-                {step.kind === "prepare_sample" && step.params && (
+
+                {/* Synthesise step */}
+                {step.kind === "synthesise" && step.params && (
                   <div className="space-y-2">
                     <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
-                      Preparation parameters
+                      Synthesis parameters
                     </div>
                     {Object.entries(step.params).map(([k, v]) => (
                       <div key={k} className="flex items-center gap-2">
@@ -386,10 +386,11 @@ function WorkflowPlanEditor({
                   </div>
                 )}
 
-                {step.kind === "test_sample" && (
+                {/* Characterise step */}
+                {step.kind === "characterise" && (
                   <div className="space-y-2">
                     <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
-                      Test conditions
+                      Characterisation conditions
                     </div>
                     <div className="flex items-center gap-2">
                       <label className="text-xs text-slate-500 w-32 shrink-0">Sample ref</label>
@@ -418,6 +419,7 @@ function WorkflowPlanEditor({
                   </div>
                 )}
 
+                {/* Optimise condition step */}
                 {step.kind === "optimise_condition" && (
                   <div className="space-y-3">
                     <div className="space-y-2">
@@ -438,7 +440,7 @@ function WorkflowPlanEditor({
                           value={step.condition_value ?? ""}
                           onChange={(e) => updateStep(step.step_id, "condition_value", parseFloat(e.target.value) || 0)}
                           className={cn(inputCls, "w-24")}
-                          placeholder="e.g. 90"
+                          placeholder="e.g. 80"
                           step="any"
                         />
                         <input
@@ -451,7 +453,7 @@ function WorkflowPlanEditor({
                       </div>
                       {(!step.condition_label || step.condition_label === "condition" || !step.condition_value) && (
                         <p className="text-[10px] text-amber-600">
-                          Set the operating condition name and value above (e.g. power_W = 90).
+                          Set the operating condition name and value above (e.g. power_W = 80).
                         </p>
                       )}
                     </div>
@@ -492,7 +494,9 @@ function WorkflowPlanEditor({
                     )}
 
                     <div className="space-y-2">
-                      <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">BO settings</div>
+                      <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+                        BO settings
+                      </div>
                       <div className="flex items-center gap-2">
                         <label className="text-xs text-slate-500 w-32 shrink-0">Iterations</label>
                         <input
@@ -517,7 +521,7 @@ function WorkflowPlanEditor({
                   </div>
                 )}
 
-                {(step.kind === "optimise_condition" || step.kind === "test_sample") && (
+                {(step.kind === "optimise_condition" || step.kind === "characterise") && (
                   <div className="flex items-center gap-2">
                     <label className="text-xs text-slate-500 w-32 shrink-0">Objective</label>
                     <span className="text-xs font-mono text-blue-600">

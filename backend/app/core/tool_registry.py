@@ -1,20 +1,18 @@
 """
 Instrument registry for MAESTRO.
 
-Instruments are defined and managed here. They persist to SQLite.
+Instruments persist to SQLite and are loaded on startup.
 
 Categories:
   physical      — lab hardware (synthesis, characterisation)
-  computational — algorithms and data tools (data, simulation, modelling)
+  computational — algorithms and data tools
 
 To add a new instrument:
   1. Via UI: Lab Setup → Instruments → Add Instrument (recommended)
   2. Via code: call TOOL_REGISTRY.register(VirtualInstrument(...)) at startup
 
-For physical instruments connected to real hardware, implement an adapter
-in backend/app/adapters/ and reference it in the instrument's metadata.
-For virtual/simulated instruments, implement the simulation logic in
-backend/app/adapters/ and call it from the execution engine (tools.py).
+For physical instruments, implement an adapter in backend/app/adapters/ and
+reference it in the instrument's `adapter` field.
 """
 from __future__ import annotations
 
@@ -58,7 +56,8 @@ class VirtualInstrument(BaseModel):
     parameters:    List[InstrumentParameter]   = Field(default_factory=list)
     outputs:       List[InstrumentOutput]      = Field(default_factory=list)
     failure_modes: List[InstrumentFailureMode] = Field(default_factory=list)
-    time_cost_min: float = 0.0
+    # time_cost_s: simulated operation time in seconds (0 = no artificial delay)
+    time_cost_s:   float = 0.0
     enabled:       bool  = True
     is_default:    bool  = False
     adapter:       str   = ""
@@ -90,6 +89,9 @@ class InstrumentRegistry:
 
     def list_by_category(self, category: str) -> List[VirtualInstrument]:
         return [t for t in self.list_all() if t.category == category]
+
+    def list_by_sub_category(self, sub_category: str) -> List[VirtualInstrument]:
+        return [t for t in self.list_all() if t.sub_category == sub_category]
 
     def list_physical(self) -> List[VirtualInstrument]:
         return self.list_by_category("physical")
@@ -132,8 +134,8 @@ class InstrumentRegistry:
 
     def get_time_cost(self, instrument_name: str, default: float = 0.0) -> float:
         inst = self.get_by_name(instrument_name)
-        if inst and inst.time_cost_min > 0:
-            return inst.time_cost_min
+        if inst and inst.time_cost_s > 0:
+            return inst.time_cost_s
         return default
 
     def check_feasibility(
@@ -177,8 +179,8 @@ class InstrumentRegistry:
                         lines.append(
                             f"    - {fm.name} (p≈{fm.probability:.0%}): {fm.description}"
                         )
-            if t.time_cost_min > 0:
-                lines.append(f"  Time cost: {t.time_cost_min} min per call")
+            if t.time_cost_s > 0:
+                lines.append(f"  Simulated time cost: {t.time_cost_s}s per call")
             lines.append("")
         return "\n".join(lines)
 
@@ -204,6 +206,9 @@ class InstrumentRegistry:
             for (defn,) in rows:
                 try:
                     data = json.loads(defn)
+                    # Migrate legacy time_cost_min → time_cost_s
+                    if "time_cost_min" in data and "time_cost_s" not in data:
+                        data["time_cost_s"] = data.pop("time_cost_min")
                     inst = VirtualInstrument(**data)
                     self._instruments[inst.tool_id] = inst
                 except Exception as e:
@@ -255,9 +260,6 @@ def register_default_instruments() -> None:
     """
     Register demo instruments for the battery electrode optimisation example.
     Only runs if no instruments exist in the database.
-
-    Time cost values are in seconds for virtual instruments.
-    Real instruments should set time_cost_min=0 (no artificial delay).
     """
     INSTRUMENT_REGISTRY.load_from_db()
 
@@ -293,11 +295,14 @@ def register_default_instruments() -> None:
         failure_modes=[
             InstrumentFailureMode(
                 name="electrode_defect",
-                description="Sample preparation fails. Probability increases at high active_material + low porosity.",
+                description=(
+                    "Sample preparation fails. Probability increases at high "
+                    "active_material and low porosity."
+                ),
                 probability=0.06,
             ),
         ],
-        time_cost_min=5.0,  # seconds of simulated operation time
+        time_cost_s=5.0,
         adapter="app.adapters.electrode_coater",
         is_default=True,
     ))
@@ -310,8 +315,7 @@ def register_default_instruments() -> None:
         description=(
             "Electrochemical discharge tester. Measures specific energy of a "
             "prepared electrode sample under a specified constant power discharge. "
-            "Backed by a validated surrogate model. Measurement includes "
-            "Gaussian noise (σ=0.5 Wh/kg) to simulate real instrument variability."
+            "Backed by a validated surrogate model with Gaussian noise (σ=0.5 Wh/kg)."
         ),
         parameters=[
             InstrumentParameter(
@@ -334,7 +338,7 @@ def register_default_instruments() -> None:
                 probability=0.02,
             ),
         ],
-        time_cost_min=8.0,  # seconds of simulated operation time
+        time_cost_s=8.0,
         adapter="app.adapters.potentiostat",
         is_default=True,
     ))
@@ -356,6 +360,6 @@ def register_default_instruments() -> None:
             ),
         ],
         failure_modes=[],
-        time_cost_min=0.0,
+        time_cost_s=0.0,
         is_default=True,
     ))

@@ -1,13 +1,13 @@
 // ── Equipment & Session ───────────────────────────────────────────────────────
 
 export interface EquipmentStatus {
-  llm:       boolean;
-  optimiser: boolean;
-  sampler:   boolean;
-  tester:    boolean;
-  memory:    boolean;
-  knowledge: boolean;
-  reporting: boolean;
+  llm:           boolean;
+  optimiser:     boolean;
+  synthesiser:   boolean;
+  characteriser: boolean;
+  memory:        boolean;
+  knowledge:     boolean;
+  reporting:     boolean;
 }
 
 export interface TimelineItem {
@@ -142,14 +142,10 @@ export interface ProjectedScheduleEntry {
 export interface ResultEntry {
   condition_label:    string;
   condition_value:    number;
-  power_W:            number;
   X:                  number[][];
   y:                  number[];
   best_params:        Record<string, number>;
   best_objective:     number | null;
-  best_energy:        number | null;
-  best_am:            number | null;
-  best_por:           number | null;
   failed_samples:     number;
   attempts:           number;
   termination_reason: string | null;
@@ -163,7 +159,6 @@ export interface OutstandingTask {
   remaining_n_calls: number;
   completed_calls?:  number;
   free_params:       Array<{ name: string; min: number; max: number; unit: string }>;
-  power_W?:          number;
 }
 
 export interface ToolCall {
@@ -216,6 +211,7 @@ export interface SessionState {
   background_job_plan_length: number;
   background_job_plan:        WorkflowStep[];
   step_statuses:              Record<string, StepStatus>;
+  bo_iteration_counts:        Record<string, number>;
   timeline:                   TimelineItem[];
   metric_labels:              MetricLabels;
   resource_log:               ResourceLogEntry[];
@@ -245,7 +241,7 @@ export interface WsEvent {
 // ── Digital Twin ──────────────────────────────────────────────────────────────
 
 export type EquipmentType =
-  | "llm" | "optimiser" | "sampler" | "tester"
+  | "llm" | "optimiser" | "synthesiser" | "characteriser"
   | "memory" | "knowledge" | "reporting" | "custom";
 
 export interface EquipmentNodeData {
@@ -253,7 +249,7 @@ export interface EquipmentNodeData {
   equipmentType: EquipmentType;
   active:        boolean;
   failProb?:     number;
-  timeCost?:     number;
+  timeCostS?:    number;
   noiseSigma?:   number;
   description?:  string;
   status:        "idle" | "active" | "failed" | "maintenance";
@@ -273,7 +269,7 @@ export interface VirtualInstrument {
   parameters:   InstrumentParameter[];
   outputs:      InstrumentOutput[];
   failure_modes:InstrumentFailureMode[];
-  time_cost_min:number;
+  time_cost_s:  number;
   enabled:      boolean;
   is_default:   boolean;
 }

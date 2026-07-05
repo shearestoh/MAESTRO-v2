@@ -9,21 +9,21 @@ function isDisplayable(ev: WsEvent): boolean {
 }
 
 const categoryColour: Record<string, string> = {
-  planning:  "text-blue-600 dark:text-blue-400",
-  execution: "text-green-600 dark:text-green-400",
-  analysis:  "text-amber-600 dark:text-amber-400",
-  reporting: "text-purple-600 dark:text-purple-400",
-  knowledge: "text-cyan-600 dark:text-cyan-400",
+  planning:  "text-blue-600",
+  execution: "text-green-600",
+  analysis:  "text-amber-600",
+  reporting: "text-purple-600",
+  knowledge: "text-cyan-600",
 };
 
 const equipmentIcon: Record<string, string> = {
-  llm:       "🧠",
-  optimiser: "📈",
-  sampler:   "🧪",
-  tester:    "⚡",
-  memory:    "💾",
-  knowledge: "📚",
-  reporting: "📊",
+  llm:           "🧠",
+  optimiser:     "📈",
+  synthesiser:   "🧪",
+  characteriser: "⚡",
+  memory:        "💾",
+  knowledge:     "📚",
+  reporting:     "📊",
 };
 
 export function ExecutionLog() {
@@ -43,7 +43,7 @@ export function ExecutionLog() {
           Execution log
         </div>
         {bgActive && (
-          <span className="text-[10px] text-blue-600 dark:text-blue-400 font-mono animate-pulse">
+          <span className="text-[10px] text-blue-600 font-mono animate-pulse">
             LIVE
           </span>
         )}
@@ -51,7 +51,7 @@ export function ExecutionLog() {
 
       <div className="flex-1 overflow-y-auto space-y-1 font-mono text-xs">
         {wsEvents.length === 0 && log.length === 0 && (
-          <div className="text-slate-400 dark:text-slate-600 italic">
+          <div className="text-slate-400 italic">
             Waiting for agent activity...
           </div>
         )}
@@ -60,7 +60,7 @@ export function ExecutionLog() {
           <div
             key={`ws-${i}`}
             className={`flex items-start gap-2 py-0.5 animate-fade-in ${
-              categoryColour[ev.category] ?? "text-slate-600 dark:text-slate-400"
+              categoryColour[ev.category] ?? "text-slate-600"
             }`}
           >
             <span className="shrink-0 w-5 text-center">
@@ -72,7 +72,7 @@ export function ExecutionLog() {
 
         {wsEvents.length === 0 &&
           [...log].reverse().slice(0, 15).map((entry, i) => (
-            <div key={`log-${i}`} className="text-slate-500 dark:text-slate-500 leading-tight">
+            <div key={`log-${i}`} className="text-slate-500 leading-tight">
               {entry}
             </div>
           ))}
