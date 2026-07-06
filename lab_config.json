@@ -1,0 +1,84 @@
+{
+  "lab_name": "My Lab",
+  "lab_description": "",
+  "system_prompt_extension": "",
+  "document_library": [],
+  "optimisation_library": [
+    {
+      "lib_id": "66ef4f82-a9a3-4b5d-b8cf-90c143357168",
+      "name": "scikit-optimize (GP-BO)",
+      "description": "Gaussian Process Bayesian Optimisation with Expected Improvement. Suitable for low-dimensional continuous spaces with noisy observations. Already installed in MAESTRO.",
+      "capabilities": [
+        "single-objective",
+        "continuous",
+        "noisy",
+        "low-dimensional"
+      ],
+      "install_cmd": "pip install scikit-optimize",
+      "docs_url": "https://scikit-optimize.github.io/",
+      "enabled": true,
+      "is_default": true
+    },
+    {
+      "lib_id": "3cabfb5c-a049-4ba1-b3d9-0da16eb97c59",
+      "name": "Random Search",
+      "description": "Uniform random sampling. No surrogate model. Useful as a baseline or when the search space is poorly understood.",
+      "capabilities": [
+        "single-objective",
+        "continuous",
+        "baseline"
+      ],
+      "install_cmd": "",
+      "docs_url": "",
+      "enabled": true,
+      "is_default": true
+    },
+    {
+      "lib_id": "d5e3f41c-0be1-4edf-97d8-52661ad92bc8",
+      "name": "Honegumi (Ax Platform)",
+      "description": "Template generator for Bayesian optimisation built on Meta's Ax Platform. Supports multi-objective, multi-task, batch, categorical, and constrained optimisation. Best for complex materials science tasks.",
+      "capabilities": [
+        "multi-objective",
+        "multi-task",
+        "batch",
+        "categorical",
+        "constrained",
+        "high-dimensional"
+      ],
+      "install_cmd": "pip install ax-platform honegumi",
+      "docs_url": "https://honegumi.readthedocs.io/",
+      "enabled": true,
+      "is_default": false
+    },
+    {
+      "lib_id": "bf3126b5-3de5-44fd-88dc-e240bc77ec05",
+      "name": "Optuna",
+      "description": "Hyperparameter optimisation with TPE sampler. Good for mixed (continuous + categorical) spaces and pruning of bad trials.",
+      "capabilities": [
+        "single-objective",
+        "multi-objective",
+        "categorical",
+        "pruning"
+      ],
+      "install_cmd": "pip install optuna",
+      "docs_url": "https://optuna.org/",
+      "enabled": true,
+      "is_default": false
+    },
+    {
+      "lib_id": "d0ced843-df08-4ed9-b11d-8ca6cff3b9fb",
+      "name": "DEAP (Evolutionary Algorithms)",
+      "description": "Distributed Evolutionary Algorithms in Python. Supports genetic algorithms and evolution strategies. Good for combinatorial and discrete spaces.",
+      "capabilities": [
+        "multi-objective",
+        "discrete",
+        "combinatorial",
+        "evolutionary"
+      ],
+      "install_cmd": "pip install deap",
+      "docs_url": "https://deap.readthedocs.io/",
+      "enabled": true,
+      "is_default": false
+    }
+  ]
+}

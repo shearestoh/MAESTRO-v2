@@ -1,4 +1,3 @@
-
 # MAESTRO
 
 **Materials Acceleration Engine for Synthesis, Testing and Research Orchestration**
@@ -30,4 +29,13 @@ cp .env.example .env          # add your GITHUB_TOKEN
 pip install uv
 uv sync
 uv run uvicorn main:app --reload
+```
+
+### Frontend
+
+```bash
+cd frontend
+uv mineru
+uv run mineru-models-download
+npm run dev
 ```
