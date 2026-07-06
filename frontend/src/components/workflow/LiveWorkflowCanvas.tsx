@@ -3,27 +3,48 @@ import { useMaestroStore } from "@/store/maestroStore";
 import { cn } from "@/lib/utils";
 import type { WorkflowStep, StepStatus } from "@/types";
 
+// ── Icon / label maps ─────────────────────────────────────────────────────────
+
 const KIND_ICON: Record<string, string> = {
   synthesise:        "🧪",
   characterise:      "⚡",
-  optimise_condition:"📈",
+  optimise_condition:"🔬",
   list_samples:      "📋",
   query_database:    "💾",
   generate_plot:     "📊",
-  analyse_data:      "🔬",
+  analyse_data:      "📉",
   narration:         "💬",
 };
 
 const KIND_LABEL: Record<string, string> = {
   synthesise:        "Synthesise",
   characterise:      "Characterise",
-  optimise_condition:"BO Campaign",
+  optimise_condition:"Optimisation",
   list_samples:      "List Samples",
   query_database:    "Query DB",
   generate_plot:     "Plot",
   analyse_data:      "Analyse",
   narration:         "Note",
 };
+
+// Map optimiser name → short display label + icon
+function getOptimiserDisplay(name: string | undefined): { label: string; icon: string } {
+  if (!name) return { label: "Optimise", icon: "🔬" };
+  const n = name.toLowerCase();
+  if (n.includes("gp") || n.includes("gp_bo") || n.includes("bayesian") || n.includes("skopt"))
+    return { label: "GP-BO",         icon: "📈" };
+  if (n.includes("random"))
+    return { label: "Random Search", icon: "🎲" };
+  if (n.includes("optuna") || n.includes("tpe"))
+    return { label: "Optuna TPE",    icon: "🔀" };
+  if (n.includes("honegumi") || n.includes("ax"))
+    return { label: "Ax/Honegumi",   icon: "🧬" };
+  if (n.includes("deap") || n.includes("evolution"))
+    return { label: "Evolutionary",  icon: "🧬" };
+  return { label: name, icon: "🔬" };
+}
+
+// ── Status styles ─────────────────────────────────────────────────────────────
 
 const STATUS_STYLES: Record<StepStatus, string> = {
   pending:   "bg-slate-50 border-slate-200 text-slate-500",
@@ -41,35 +62,36 @@ const STATUS_ICON: Record<StepStatus, string> = {
   skipped:   "⊘",
 };
 
+// ── Grouping ──────────────────────────────────────────────────────────────────
+
 interface ConditionGroup {
-  label:     string;
-  condition: string;
-  steps:     WorkflowStep[];
-  status:    StepStatus;
-  // BO iteration progress (from bo_iteration_counts, not step count)
+  label:            string;
+  condition:        string;
+  optimiserName?:   string;
+  steps:            WorkflowStep[];
+  status:           StepStatus;
   currentIteration: number;
   totalIterations:  number;
-  projected_start_time?: string;
-  projected_end_time?:   string;
 }
 
 function groupSteps(
-  plan:             WorkflowStep[],
-  statuses:         Record<string, StepStatus>,
+  plan:              WorkflowStep[],
+  statuses:          Record<string, StepStatus>,
   boIterationCounts: Record<string, number>,
 ): { groups: ConditionGroup[]; singles: WorkflowStep[] } {
   const boSteps    = plan.filter((s) => s.kind === "optimise_condition");
   const otherSteps = plan.filter((s) => s.kind !== "optimise_condition");
 
+  // Key includes optimiser so same condition with different optimisers are separate groups
   const condMap = new Map<string, WorkflowStep[]>();
   for (const step of boSteps) {
-    const key = `${step.condition_label}=${step.condition_value}`;
+    const key = `${step.condition_label}=${step.condition_value}|${step.optimiser_name ?? ""}`;
     if (!condMap.has(key)) condMap.set(key, []);
     condMap.get(key)!.push(step);
   }
 
   const groups: ConditionGroup[] = [];
-  for (const [key, steps] of condMap.entries()) {
+  for (const [, steps] of condMap.entries()) {
     const stepStatuses = steps.map(
       (s) => statuses[s.step_id ?? ""] ?? "pending"
     );
@@ -84,27 +106,27 @@ function groupSteps(
       ? "running"
       : "pending";
 
-    const firstStep = steps[0];
-    // Use actual BO iteration count from session state for live progress
+    const firstStep        = steps[0];
     const currentIteration = firstStep?.step_id
       ? (boIterationCounts[firstStep.step_id] ?? 0)
       : 0;
-    const totalIterations = firstStep?.n_calls ?? 20;
+    const totalIterations  = firstStep?.n_calls ?? 20;
 
     groups.push({
-      label:     firstStep?.label ?? key,
-      condition: key,
+      label:            firstStep?.label ?? "",
+      condition:        `${firstStep?.condition_label}=${firstStep?.condition_value}`,
+      optimiserName:    firstStep?.optimiser_name,
       steps,
       status,
       currentIteration,
       totalIterations,
-      projected_start_time: firstStep?.projected_start_time,
-      projected_end_time:   firstStep?.projected_end_time,
     });
   }
 
   return { groups, singles: otherSteps };
 }
+
+// ── Main component ────────────────────────────────────────────────────────────
 
 export function LiveWorkflowCanvas() {
   const state    = useMaestroStore((s) => s.state);
@@ -119,8 +141,8 @@ export function LiveWorkflowCanvas() {
     return [];
   }, [pending, state?.background_job_plan]);
 
-  const statuses: Record<string, StepStatus>  = state?.step_statuses ?? {};
-  const boIterationCounts: Record<string, number> = state?.bo_iteration_counts ?? {};
+  const statuses:          Record<string, StepStatus> = state?.step_statuses      ?? {};
+  const boIterationCounts: Record<string, number>     = state?.bo_iteration_counts ?? {};
 
   const { groups, singles } = useMemo(
     () => groupSteps(rawPlan, statuses, boIterationCounts),
@@ -139,6 +161,8 @@ export function LiveWorkflowCanvas() {
 
   return (
     <div className="w-full h-full overflow-y-auto p-3 space-y-2">
+
+      {/* Header */}
       <div className="flex items-center justify-between shrink-0">
         <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
           {pending ? "Proposed Workflow" : "Live Workflow"}
@@ -150,6 +174,7 @@ export function LiveWorkflowCanvas() {
         )}
       </div>
 
+      {/* Non-BO steps */}
       {singles.map((step) => (
         <SingleStepNode
           key={step.step_id ?? step.kind}
@@ -158,15 +183,18 @@ export function LiveWorkflowCanvas() {
         />
       ))}
 
+      {/* BO / optimisation groups */}
       {groups.map((group) => (
         <ConditionGroupNode
-          key={group.condition}
+          key={`${group.condition}|${group.optimiserName ?? ""}`}
           group={group}
         />
       ))}
     </div>
   );
 }
+
+// ── Single step node ──────────────────────────────────────────────────────────
 
 function SingleStepNode({
   step,
@@ -211,10 +239,14 @@ function SingleStepNode({
   );
 }
 
+// ── Condition group node (optimisation steps) ─────────────────────────────────
+
 function ConditionGroupNode({ group }: { group: ConditionGroup }) {
   const pct = group.totalIterations > 0
     ? Math.round((group.currentIteration / group.totalIterations) * 100)
     : 0;
+
+  const { label: optLabel, icon: optIcon } = getOptimiserDisplay(group.optimiserName);
 
   return (
     <div className={cn(
@@ -222,13 +254,18 @@ function ConditionGroupNode({ group }: { group: ConditionGroup }) {
       STATUS_STYLES[group.status],
     )}>
       <div className="flex items-center gap-2 px-3 py-2">
-        <span className="text-base shrink-0">📈</span>
+        <span className="text-base shrink-0">{optIcon}</span>
         <div className="flex-1 min-w-0">
+          {/* Show the actual step label from the LLM (e.g. "Optimise under 80W") */}
           <div className="font-medium truncate">
-            BO @ {group.condition}
+            {group.label || `Optimise @ ${group.condition}`}
           </div>
-          <div className="text-[10px] opacity-70">
-            {group.currentIteration}/{group.totalIterations} iterations
+          <div className="text-[10px] opacity-70 flex items-center gap-1.5">
+            <span>{group.currentIteration}/{group.totalIterations} iterations</span>
+            {/* Optimiser badge */}
+            <span className="px-1 py-0 rounded bg-white/50 font-medium">
+              {optLabel}
+            </span>
           </div>
         </div>
         <span className="font-mono text-[11px] shrink-0">

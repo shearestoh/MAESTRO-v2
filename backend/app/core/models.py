@@ -162,6 +162,7 @@ class WorkflowStep(BaseModel):
     condition_unit:  str = ""
     free_params:     List[dict] = Field(default_factory=list)
     objective_metric:Optional[str] = None
+    optimiser_name:  Optional[str] = None 
     n_calls:         int = 20
     n_initial_points:int = 6
     plot_code:       Optional[str] = None

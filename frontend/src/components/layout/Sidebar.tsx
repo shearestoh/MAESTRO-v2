@@ -2,7 +2,7 @@ import { NavLink } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useMaestroStore } from "@/store/maestroStore";
 import {
-  LayoutDashboard, BookOpen, Settings, FlaskConical,
+  LayoutDashboard, BookOpen, Settings,
   ChevronLeft, ChevronRight, Wifi, WifiOff, RotateCcw,
 } from "lucide-react";
 
@@ -10,7 +10,6 @@ const navItems = [
   { to: "/",         icon: LayoutDashboard, label: "Dashboard"    },
   { to: "/lab",      icon: Settings,        label: "Lab Setup"    },
   { to: "/notebook", icon: BookOpen,        label: "Lab Notebook" },
-  { to: "/campaign", icon: FlaskConical,    label: "Campaign"     },
 ];
 
 function MaestroLogo({ size = 32 }: { size?: number }) {

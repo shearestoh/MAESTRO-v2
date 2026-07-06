@@ -294,12 +294,7 @@ function CharacterisationTab({
   );
 }
 
-function ComputationTab({
-  results, nCallsTarget,
-}: {
-  results:       ResultEntry[];
-  nCallsTarget:  number;
-}) {
+function ComputationTab({ results, nCallsTarget }: { results: ResultEntry[]; nCallsTarget: number; }) {
   if (results.length === 0) {
     return (
       <EmptyState
@@ -310,24 +305,59 @@ function ComputationTab({
     );
   }
 
+  // Group by optimiser for display
+  const optimisers = [...new Set(results.map((r) => r.optimiser_name || "unknown"))];
+  const hasMultipleOptimisers = optimisers.length > 1;
+
   return (
     <div className="space-y-3 max-w-3xl">
       <div className="text-xs text-slate-500 mb-3">
         {results.length} optimisation run{results.length !== 1 ? "s" : ""}
+        {hasMultipleOptimisers && (
+          <span className="ml-2 text-blue-600">· {optimisers.length} optimisers compared</span>
+        )}
       </div>
+
+      {hasMultipleOptimisers && (
+        <div className="glass-panel p-3 space-y-1 border-blue-100 border">
+          <div className="text-xs font-semibold text-slate-600 mb-2">Optimiser comparison</div>
+          {optimisers.map((opt) => {
+            const optResults = results.filter((r) => (r.optimiser_name || "unknown") === opt);
+            const bestOverall = Math.max(...optResults.map((r) => r.best_objective ?? -Infinity));
+            return (
+              <div key={opt} className="flex justify-between text-xs">
+                <span className="text-slate-600 font-medium">{opt}</span>
+                <span className="font-mono text-green-600">
+                  best: {isFinite(bestOverall) ? bestOverall.toFixed(4) : "—"}
+                  <span className="text-slate-400 ml-1">({optResults.length} runs)</span>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {results.map((r, idx) => {
-        const label   = r.condition_label || "condition";
-        const value   = r.condition_value ?? 0;
-        const bestObj = r.best_objective ?? null;
-        const nEvals  = r.X.length;
-        const pct     = Math.min(100, (nEvals / nCallsTarget) * 100);
+        const label      = r.condition_label || "condition";
+        const value      = r.condition_value ?? 0;
+        const bestObj    = r.best_objective ?? null;
+        const nEvals     = r.X.length;
+        const pct        = Math.min(100, (nEvals / nCallsTarget) * 100);
+        const optName    = r.optimiser_name || "";
 
         return (
           <div key={idx} className="glass-panel p-4 space-y-3">
-            <div className="flex justify-between items-center">
-              <span className="text-sm font-bold text-slate-800">{label} = {value}</span>
+            <div className="flex justify-between items-start">
+              <div>
+                <span className="text-sm font-bold text-slate-800">{label} = {value}</span>
+                {optName && (
+                  <span className="ml-2 text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded font-medium">
+                    {optName}
+                  </span>
+                )}
+              </div>
               <span className={cn(
-                "text-xs px-2 py-0.5 rounded-full",
+                "text-xs px-2 py-0.5 rounded-full shrink-0",
                 nEvals > 0 ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-500",
               )}>
                 {nEvals} evaluations
@@ -371,7 +401,6 @@ function ComputationTab({
     </div>
   );
 }
-
 function EmptyState({ icon, title, description }: { icon: string; title: string; description: string }) {
   return (
     <div className="flex flex-col items-center justify-center h-64 space-y-3">

@@ -149,24 +149,20 @@ def _resolve_ref(value: Any, context: Dict[str, Any]) -> Any:
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 # ── Projected Schedule ────────────────────────────────────────────────────────
 
-def compute_projected_schedule(
-    plan: List[dict],
-) -> List[ProjectedScheduleEntry]:
-    """
-    Compute projected start/end times for each step.
-
-    For optimise_condition steps, generates individual projected bars for each
-    BO iteration across the synthesis and characterisation instruments.
-    """
+def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]:
     from app.core.tool_registry import INSTRUMENT_REGISTRY
-    from datetime import datetime as dt, timedelta
+    from datetime import datetime as dt, timedelta, timezone
 
-    now = dt.utcnow()
+    now = dt.now(timezone.utc)
+    
+    def to_iso(d: dt) -> str:
+        return d.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    
     step_end:        Dict[str, dt] = {}
     instrument_free: Dict[str, dt] = {}
     entries:         List[ProjectedScheduleEntry] = []
@@ -193,7 +189,6 @@ def compute_projected_schedule(
         )
 
         if kind == "optimise_condition":
-            # Generate one projected bar per BO iteration for each instrument
             n_calls = int(step.get("n_calls") or 10)
 
             synth_instruments = INSTRUMENT_REGISTRY.list_by_sub_category("synthesis")
@@ -203,7 +198,7 @@ def compute_projected_schedule(
             synth_time = INSTRUMENT_REGISTRY.get_time_cost(synth_name, default=5.0)
             char_time  = INSTRUMENT_REGISTRY.get_time_cost(char_name,  default=8.0)
 
-            label_base = step.get("label", "BO")
+            label_base = step.get("label", "Optimisation")
             cursor     = max(dep_end, instrument_free.get("optimiser", now), now)
 
             for i in range(n_calls):
@@ -212,8 +207,8 @@ def compute_projected_schedule(
                 entries.append(ProjectedScheduleEntry(
                     instrument_id=synth_name,
                     instrument_name=synth_name,
-                    start_time=synth_start.isoformat(),
-                    end_time=synth_end.isoformat(),
+                    start_time=to_iso(synth_start),
+                    end_time=to_iso(synth_end),
                     step_id=f"{step_id}-synth-{i}",
                     label=f"{label_base} iter {i + 1} — synthesise",
                     is_projected=True,
@@ -225,8 +220,8 @@ def compute_projected_schedule(
                 entries.append(ProjectedScheduleEntry(
                     instrument_id=char_name,
                     instrument_name=char_name,
-                    start_time=char_start.isoformat(),
-                    end_time=char_end.isoformat(),
+                    start_time=to_iso(char_start),
+                    end_time=to_iso(char_end),
                     step_id=f"{step_id}-char-{i}",
                     label=f"{label_base} iter {i + 1} — characterise",
                     is_projected=True,
@@ -236,8 +231,8 @@ def compute_projected_schedule(
 
             step_end[step_id]            = cursor
             instrument_free["optimiser"] = cursor
-            step["projected_start_time"] = max(dep_end, now).isoformat()
-            step["projected_end_time"]   = cursor.isoformat()
+            step["projected_start_time"] = to_iso(max(dep_end, now))
+            step["projected_end_time"]   = to_iso(cursor)
 
         else:
             raw_instrument_id = (
@@ -258,8 +253,8 @@ def compute_projected_schedule(
             step_end[step_id]              = proj_end
             instrument_free[instrument_id] = proj_end
 
-            step["projected_start_time"] = proj_start.isoformat()
-            step["projected_end_time"]   = proj_end.isoformat()
+            step["projected_start_time"] = to_iso(proj_start)
+            step["projected_end_time"]   = to_iso(proj_end)
 
             if duration_s > 0 and instrument_id not in (
                 "optimiser", "memory", "reporting", "knowledge", "unknown", ""
@@ -267,8 +262,8 @@ def compute_projected_schedule(
                 entries.append(ProjectedScheduleEntry(
                     instrument_id=instrument_id,
                     instrument_name=instrument_name,
-                    start_time=proj_start.isoformat(),
-                    end_time=proj_end.isoformat(),
+                    start_time=to_iso(proj_start),
+                    end_time=to_iso(proj_end),
                     step_id=step_id,
                     label=step.get("label", step.get("kind", "")),
                     is_projected=True,
@@ -1133,6 +1128,7 @@ def build_execution_plan_from_tool_calls(session, tool_calls: List[dict]) -> Lis
                         step["n_calls"] = session.optimiser_config.n_calls
                     if not step.get("n_initial_points"):
                         step["n_initial_points"] = session.optimiser_config.n_initial_points
+                    step["optimiser_name"] = session.optimiser_config.name
 
                 plan.append(step)
 

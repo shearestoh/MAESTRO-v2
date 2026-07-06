@@ -108,6 +108,7 @@ export interface WorkflowStep {
   condition_unit?:  string;
   free_params?:     Array<{ name: string; min: number; max: number; unit: string }>;
   objective_metric?: string;
+  optimiser_name?:  string;
   n_calls?:         number;
   n_initial_points?: number;
   plot_code?:       string;
@@ -142,6 +143,7 @@ export interface ProjectedScheduleEntry {
 export interface ResultEntry {
   condition_label:    string;
   condition_value:    number;
+  optimiser_name:     string; 
   X:                  number[][];
   y:                  number[];
   best_params:        Record<string, number>;

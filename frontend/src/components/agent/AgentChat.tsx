@@ -279,27 +279,49 @@ function WorkflowPlanEditor({
     }));
   };
 
-  const stepKindIcon: Record<string, string> = {
-    synthesise:        "🧪",
-    characterise:      "⚡",
-    optimise_condition:"📈",
-    list_samples:      "📋",
-    query_database:    "💾",
-    generate_plot:     "📊",
-    analyse_data:      "🔬",
-    narration:         "💬",
-  };
+  function getStepKindIcon(step: WorkflowStep): string {
+    if (step.kind === "optimise_condition") {
+      const n = (step.optimiser_name ?? "").toLowerCase();
+      if (n.includes("random"))   return "🎲";
+      if (n.includes("optuna"))   return "🔀";
+      if (n.includes("deap"))     return "🧬";
+      if (n.includes("honegumi") || n.includes("ax")) return "🧬";
+      return "📈"; // default GP-BO
+    }
+    const icons: Record<string, string> = {
+      synthesise:    "🧪",
+      characterise:  "⚡",
+      list_samples:  "📋",
+      query_database:"💾",
+      generate_plot: "📊",
+      analyse_data:  "📉",
+      narration:     "💬",
+    };
+    return icons[step.kind] ?? "⚙️";
+  }
 
-  const stepKindLabel: Record<string, string> = {
-    synthesise:        "Synthesise",
-    characterise:      "Characterise",
-    optimise_condition:"BO Optimisation",
-    list_samples:      "List Samples",
-    query_database:    "Query Database",
-    generate_plot:     "Generate Plot",
-    analyse_data:      "Analyse Data",
-    narration:         "Note",
-  };
+  function getStepKindLabel(step: WorkflowStep): string {
+    if (step.kind === "optimise_condition") {
+      const n = (step.optimiser_name ?? "").toLowerCase();
+      if (n.includes("random"))   return "Random Search";
+      if (n.includes("optuna"))   return "Optuna TPE";
+      if (n.includes("honegumi") || n.includes("ax")) return "Ax/Honegumi";
+      if (n.includes("deap"))     return "Evolutionary (DEAP)";
+      if (n.includes("gp") || n.includes("gp_bo")) return "GP-BO";
+      if (n)                      return n;
+      return "Optimisation";
+    }
+    const labels: Record<string, string> = {
+      synthesise:   "Synthesise",
+      characterise: "Characterise",
+      list_samples: "List Samples",
+      query_database: "Query Database",
+      generate_plot:  "Generate Plot",
+      analyse_data:   "Analyse Data",
+      narration:      "Note",
+    };
+    return labels[step.kind] ?? step.kind;
+  }
 
   const inputCls = cn(
     "flex-1 rounded-md px-2 py-1 text-xs",
@@ -341,11 +363,11 @@ function WorkflowPlanEditor({
               onClick={() => toggleStep(step.step_id)}
             >
               <span className="text-slate-400 text-xs font-mono w-5 shrink-0">{idx + 1}</span>
-              <span className="text-base">{stepKindIcon[step.kind] ?? "⚙️"}</span>
+              <span className="text-base">{getStepKindIcon(step)}</span>
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-semibold text-slate-700 truncate">{step.label}</div>
                 <div className="text-[10px] text-slate-400">
-                  {stepKindLabel[step.kind] ?? step.kind}
+                  {getStepKindLabel(step)}
                   {step.instrument && ` · ${step.instrument}`}
                 </div>
               </div>

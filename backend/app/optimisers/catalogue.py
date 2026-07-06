@@ -1,12 +1,14 @@
 """
 Optimisation algorithm catalogue.
 
-Built-in: gp_bo (scikit-optimize), random (uniform random search).
-Optional: optuna (TPE) — installed separately with: pip install optuna
+Built-in (always available):
+  gp_bo   — scikit-optimize Gaussian Process BO
+  random  — uniform random search
 
-To add a new optimiser:
-1. Implement BaseOptimiser in a new module under app/optimisers/
-2. Add an entry to OPTIMISER_CATALOGUE (or register dynamically below)
+Optional (install separately):
+  optuna   — pip install optuna
+  honegumi — pip install ax-platform
+  deap     — pip install deap
 """
 from __future__ import annotations
 
@@ -22,10 +24,26 @@ OPTIMISER_CATALOGUE: Dict[str, Type[BaseOptimiser]] = {
     "gp_bo":  GPBayesianOptimiser,
 }
 
+# ── Register optional optimisers if installed ─────────────────────────────────
+
 try:
     from app.optimisers.optuna_bo import OptunaOptimiser
     OPTIMISER_CATALOGUE["optuna"] = OptunaOptimiser
-except ImportError:
+except (ImportError, Exception):
+    pass
+
+try:
+    from app.optimisers.honegumi_bo import HonegumiOptimiser
+    OPTIMISER_CATALOGUE["honegumi"] = HonegumiOptimiser
+    OPTIMISER_CATALOGUE["ax"]       = HonegumiOptimiser  # alias
+except (ImportError, Exception):
+    pass
+
+try:
+    from app.optimisers.deap_bo import DEAPOptimiser
+    OPTIMISER_CATALOGUE["deap"]        = DEAPOptimiser
+    OPTIMISER_CATALOGUE["evolutionary"] = DEAPOptimiser  # alias
+except (ImportError, Exception):
     pass
 
 
@@ -33,17 +51,45 @@ def get_optimiser(name: str) -> BaseOptimiser:
     """
     Return an instantiated optimiser by name.
 
-    Falls back to GP-BO with a warning if the requested optimiser is not
-    available (e.g. optional dependency not installed).
+    Normalises common aliases before lookup.
+    Falls back to GP-BO with a warning if not found.
     """
-    if name in OPTIMISER_CATALOGUE:
-        return OPTIMISER_CATALOGUE[name]()
+    # Normalise aliases
+    aliases = {
+        "gp-bo":          "gp_bo",
+        "gp bo":          "gp_bo",
+        "bayesian":       "gp_bo",
+        "scikit":         "gp_bo",
+        "scikit-optimize":"gp_bo",
+        "skopt":          "gp_bo",
+        "random search":  "random",
+        "random_search":  "random",
+        "tpe":            "optuna",
+        "ax":             "honegumi",
+        "ax-platform":    "honegumi",
+        "evolution":      "deap",
+        "evolutionary":   "deap",
+        "genetic":        "deap",
+    }
+    normalised = aliases.get(name.lower().strip(), name.lower().strip())
+
+    if normalised in OPTIMISER_CATALOGUE:
+        return OPTIMISER_CATALOGUE[normalised]()
 
     warnings.warn(
-        f"Optimiser '{name}' not found in catalogue. "
+        f"Optimiser '{name}' (normalised: '{normalised}') not found. "
         f"Available: {list(OPTIMISER_CATALOGUE.keys())}. "
-        f"Falling back to GP-BO.",
+        f"Falling back to GP-BO. "
+        f"Install optional optimisers: pip install optuna ax-platform deap",
         RuntimeWarning,
         stacklevel=2,
     )
     return OPTIMISER_CATALOGUE["gp_bo"]()
+
+
+def list_available() -> Dict[str, str]:
+    """Return dict of {key: description} for all registered optimisers."""
+    return {
+        key: cls().description
+        for key, cls in OPTIMISER_CATALOGUE.items()
+    }
