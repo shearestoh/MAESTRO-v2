@@ -122,6 +122,7 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
         pending_calls = list(session.agent_state.pending_tool_calls)
         pending_names = [tc["function"]["name"] for tc in pending_calls]
 
+        # Build the execution plan from ALL pending tool calls
         plan = build_execution_plan_from_tool_calls(session, pending_calls)
 
         if _plan_requires_approval(plan):
@@ -184,39 +185,122 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
         return
 
     if has_plan_workflow:
+        from app.core.models import WorkflowPlan, WorkflowStep
+
+        all_steps: list = []
+        summaries: list[str] = []
+
+        for tc in pending_calls:
+            if tc["function"]["name"] != "plan_workflow":
+                continue
+            args = {}
+            try:
+                args = json.loads(tc["function"]["arguments"] or "{}")
+            except Exception:
+                pass
+
+            summaries.append(args.get("summary", ""))
+
+            for s in args.get("steps", []):
+                # ── Defensive defaults — LLM sometimes omits these ────────────────
+                if not s.get("label"):
+                    # Generate a meaningful default label from available fields
+                    kind  = s.get("kind", "step")
+                    cond  = s.get("condition_label", "")
+                    val   = s.get("condition_value", "")
+                    opt   = s.get("optimiser_name", "")
+                    if kind == "optimise_condition" and cond:
+                        opt_display = f" [{opt}]" if opt else ""
+                        s["label"] = f"Optimise {cond}={val}{opt_display}"
+                    elif kind == "synthesise":
+                        s["label"] = "Synthesise sample"
+                    elif kind == "characterise":
+                        s["label"] = "Characterise sample"
+                    else:
+                        s["label"] = kind.replace("_", " ").title()
+
+                if not s.get("step_id"):
+                    s["step_id"] = str(__import__("uuid").uuid4())[:8]
+
+                # Stamp instrument_id
+                raw_id = s.get("instrument_id") or s.get("instrument") or s.get("kind") or "unknown"
+                s["instrument_id"] = str(raw_id)
+                s.setdefault("status", "pending")
+                s.setdefault("dependencies", [])
+
+                # Stamp optimiser_name for optimise_condition steps
+                if s.get("kind") == "optimise_condition":
+                    if not s.get("condition_label"):
+                        s["condition_label"] = "condition"
+                    if s.get("condition_value") is None:
+                        s["condition_value"] = 0.0
+                    else:
+                        s["condition_value"] = float(s["condition_value"])
+                    if not s.get("free_params"):
+                        s["free_params"] = []
+                    if not s.get("objective_metric"):
+                        s["objective_metric"] = "objective"
+                    if not s.get("n_calls"):
+                        s["n_calls"] = session.optimiser_config.n_calls
+                    if not s.get("n_initial_points"):
+                        s["n_initial_points"] = session.optimiser_config.n_initial_points
+                    if not s.get("optimiser_name"):
+                        s["optimiser_name"] = session.optimiser_config.name
+
+                editable = []
+                if s.get("kind") == "optimise_condition":
+                    editable = ["n_calls", "n_initial_points", "condition_value"]
+                    for fp in s.get("free_params", []):
+                        editable += [f"{fp['name']}_min", f"{fp['name']}_max"]
+                elif s.get("kind") in ("synthesise", "characterise"):
+                    editable = list(s.get("params", {}).keys()) + list(s.get("conditions", {}).keys())
+                s["editable_fields"] = editable
+
+                try:
+                    all_steps.append(WorkflowStep(**s))
+                except Exception as e:
+                    # Log and skip malformed steps rather than crashing
+                    print(f"[WARN] Could not parse workflow step: {e} | step: {s}")
+                    continue
+
+        if not all_steps:
+            # Nothing valid — let LLM know
+            session.agent_state.messages.append({
+                "role": "assistant",
+                "content": "I couldn't build a valid workflow plan. Please try describing the steps again.",
+            })
+            return
+
+        combined_summary = (
+            summaries[0] if len(summaries) == 1
+            else f"{len(all_steps)}-step workflow: " + "; ".join(s for s in summaries if s)
+        )
+
+        session.pending_plan = WorkflowPlan(
+            summary=combined_summary,
+            steps=all_steps,
+            source="agent",
+        )
+        plan_steps = [step.model_dump() for step in session.pending_plan.steps]
+        session.projected_schedule = compute_projected_schedule(plan=plan_steps)
+
+        # Inject tool responses for all plan_workflow calls
         for tc in pending_calls:
             if tc["function"]["name"] == "plan_workflow":
-                args = {}
-                try:
-                    args = json.loads(tc["function"]["arguments"] or "{}")
-                except Exception:
-                    pass
-                from app.core.models import WorkflowPlan, WorkflowStep
-                steps = []
-                for s in args.get("steps", []):
-                    editable = []
-                    if s.get("kind") == "optimise_condition":
-                        editable = ["n_calls", "n_initial_points", "condition_value"]
-                        for fp in s.get("free_params", []):
-                            editable += [f"{fp['name']}_min", f"{fp['name']}_max"]
-                    elif s.get("kind") in ("synthesise", "characterise"):
-                        editable = list(s.get("params", {}).keys()) + list(s.get("conditions", {}).keys())
-                    s["editable_fields"] = editable
-                    steps.append(WorkflowStep(**s))
-
-                session.pending_plan = WorkflowPlan(
-                    summary=args.get("summary", "Proposed workflow"),
-                    steps=steps,
-                    source="agent",
-                )
-                plan_steps = [step.model_dump() for step in session.pending_plan.steps]
-                session.projected_schedule = compute_projected_schedule(plan=plan_steps)
-                break
+                session.agent_state.messages.append({
+                    "role":         "tool",
+                    "tool_call_id": tc["id"],
+                    "name":         "plan_workflow",
+                    "content":      json.dumps({
+                        "status":  "pending_approval",
+                        "message": "Workflow plan presented to user for approval.",
+                    }),
+                })
         return
 
+    # Fallback: build plan from whatever instrument steps exist
     session.pending_plan = None
     with lock:
-        from app.core.models import WorkflowPlan, WorkflowStep
         steps = []
         for step in plan:
             if step.get("kind") in _INSTRUMENT_STEP_KINDS:

@@ -366,9 +366,14 @@ function WorkflowPlanEditor({
               <span className="text-base">{getStepKindIcon(step)}</span>
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-semibold text-slate-700 truncate">{step.label}</div>
-                <div className="text-[10px] text-slate-400">
-                  {getStepKindLabel(step)}
-                  {step.instrument && ` · ${step.instrument}`}
+                <div className="text-[10px] text-slate-400 flex items-center gap-1.5 flex-wrap">
+                  <span>{getStepKindLabel(step)}</span>
+                  {step.instrument && <span>· {step.instrument}</span>}
+                  {step.kind === "optimise_condition" && step.optimiser_name && (
+                    <span className="px-1 py-0 rounded bg-blue-100 text-blue-600 font-medium">
+                      {step.optimiser_name}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-1">

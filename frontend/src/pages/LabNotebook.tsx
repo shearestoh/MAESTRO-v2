@@ -14,7 +14,9 @@ export function LabNotebook() {
   const samples = state?.sample_registry ?? [];
   const results = state?.results_store   ?? [];
 
-  const synthesisSamples        = samples.filter((s) => s.status === "prepared" || s.status === "failed");
+  const synthesisSamples = samples.filter(
+    (s) => s.status === "prepared" || s.status === "tested" || s.status === "failed"
+  );
   const characterisationSamples = samples.filter((s) => s.results.length > 0);
 
   const tabs: { id: Tab; label: string; count: number }[] = [
@@ -110,7 +112,13 @@ function SynthesisTab({ samples }: { samples: Sample[] }) {
   return (
     <div className="space-y-2 max-w-3xl">
       <div className="text-xs text-slate-500 mb-3">
-        {samples.length} sample{samples.length !== 1 ? "s" : ""} synthesised
+        {(() => {
+          const successful = samples.filter((s) => s.status === "prepared" || s.status === "tested").length;
+          const failed     = samples.filter((s) => s.status === "failed").length;
+          const parts      = [`${successful} synthesised`];
+          if (failed > 0) parts.push(`${failed} failed`);
+          return parts.join(", ");
+        })()}
       </div>
       {samples.map((s) => (
         <div key={s.sample_id} className="glass-panel overflow-hidden">
@@ -294,7 +302,12 @@ function CharacterisationTab({
   );
 }
 
-function ComputationTab({ results, nCallsTarget }: { results: ResultEntry[]; nCallsTarget: number; }) {
+function ComputationTab({
+  results, nCallsTarget,
+}: {
+  results:       ResultEntry[];
+  nCallsTarget:  number;
+}) {
   if (results.length === 0) {
     return (
       <EmptyState
@@ -305,54 +318,84 @@ function ComputationTab({ results, nCallsTarget }: { results: ResultEntry[]; nCa
     );
   }
 
-  // Group by optimiser for display
+  // Build comparison summary if multiple optimisers present
   const optimisers = [...new Set(results.map((r) => r.optimiser_name || "unknown"))];
-  const hasMultipleOptimisers = optimisers.length > 1;
+  const hasMultiple = optimisers.length > 1;
 
   return (
     <div className="space-y-3 max-w-3xl">
       <div className="text-xs text-slate-500 mb-3">
         {results.length} optimisation run{results.length !== 1 ? "s" : ""}
-        {hasMultipleOptimisers && (
-          <span className="ml-2 text-blue-600">· {optimisers.length} optimisers compared</span>
+        {hasMultiple && (
+          <span className="ml-2 text-blue-600">
+            · {optimisers.length} optimisers compared
+          </span>
         )}
       </div>
 
-      {hasMultipleOptimisers && (
-        <div className="glass-panel p-3 space-y-1 border-blue-100 border">
-          <div className="text-xs font-semibold text-slate-600 mb-2">Optimiser comparison</div>
-          {optimisers.map((opt) => {
-            const optResults = results.filter((r) => (r.optimiser_name || "unknown") === opt);
-            const bestOverall = Math.max(...optResults.map((r) => r.best_objective ?? -Infinity));
-            return (
-              <div key={opt} className="flex justify-between text-xs">
-                <span className="text-slate-600 font-medium">{opt}</span>
-                <span className="font-mono text-green-600">
-                  best: {isFinite(bestOverall) ? bestOverall.toFixed(4) : "—"}
-                  <span className="text-slate-400 ml-1">({optResults.length} runs)</span>
-                </span>
-              </div>
-            );
-          })}
+      {/* Comparison summary table */}
+      {hasMultiple && (
+        <div className="glass-panel p-3 border-blue-100 border mb-2">
+          <div className="text-xs font-semibold text-slate-600 mb-2">
+            Optimiser comparison
+          </div>
+          <table className="w-full text-xs border-collapse">
+            <thead>
+              <tr className="text-left text-slate-500">
+                <th className="pb-1 pr-4">Condition</th>
+                <th className="pb-1 pr-4">Optimiser</th>
+                <th className="pb-1 pr-4">Best objective</th>
+                <th className="pb-1">Evaluations</th>
+              </tr>
+            </thead>
+            <tbody>
+              {results.map((r, i) => (
+                <tr key={i} className="border-t border-slate-100">
+                  <td className="py-1 pr-4 font-mono text-slate-700">
+                    {r.condition_label} = {r.condition_value}
+                  </td>
+                  <td className="py-1 pr-4">
+                    <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 font-medium">
+                      {r.optimiser_name || "unknown"}
+                    </span>
+                  </td>
+                  <td className="py-1 pr-4 font-mono text-green-600 font-bold">
+                    {r.best_objective !== null ? r.best_objective.toFixed(4) : "—"}
+                  </td>
+                  <td className="py-1 text-slate-500">
+                    {r.X.length}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
+      {/* Individual run cards */}
       {results.map((r, idx) => {
-        const label      = r.condition_label || "condition";
-        const value      = r.condition_value ?? 0;
-        const bestObj    = r.best_objective ?? null;
-        const nEvals     = r.X.length;
-        const pct        = Math.min(100, (nEvals / nCallsTarget) * 100);
-        const optName    = r.optimiser_name || "";
+        // ── Extract fields individually — NEVER concatenate them ──
+        const conditionLabel = r.condition_label || "condition";
+        const conditionValue = r.condition_value ?? 0;
+        const optimiserName  = r.optimiser_name  || "";
+        const bestObj        = r.best_objective  ?? null;
+        const nEvals         = r.X.length;
+        const progressPct    = Math.min(100, (nEvals / nCallsTarget) * 100);
 
         return (
           <div key={idx} className="glass-panel p-4 space-y-3">
-            <div className="flex justify-between items-start">
-              <div>
-                <span className="text-sm font-bold text-slate-800">{label} = {value}</span>
-                {optName && (
-                  <span className="ml-2 text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded font-medium">
-                    {optName}
+
+            {/* Header row: condition + optimiser badge + eval count */}
+            <div className="flex justify-between items-start gap-2">
+              <div className="flex items-center gap-2 flex-wrap min-w-0">
+                {/* Condition — standalone, no concatenation */}
+                <span className="text-sm font-bold text-slate-800">
+                  {conditionLabel} = {conditionValue}
+                </span>
+                {/* Optimiser — separate badge element */}
+                {optimiserName && (
+                  <span className="text-[10px] text-blue-600 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded font-medium whitespace-nowrap">
+                    {optimiserName}
                   </span>
                 )}
               </div>
@@ -360,29 +403,36 @@ function ComputationTab({ results, nCallsTarget }: { results: ResultEntry[]; nCa
                 "text-xs px-2 py-0.5 rounded-full shrink-0",
                 nEvals > 0 ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-500",
               )}>
-                {nEvals} evaluations
+                {nEvals} evals
               </span>
             </div>
 
+            {/* Best objective */}
             {bestObj !== null && (
               <div className="text-xs text-slate-500">
                 Best objective:{" "}
-                <span className="text-green-600 font-mono font-bold">{bestObj.toFixed(4)}</span>
+                <span className="text-green-600 font-mono font-bold">
+                  {bestObj.toFixed(4)}
+                </span>
               </div>
             )}
 
+            {/* Best parameters */}
             {r.best_params && Object.keys(r.best_params).length > 0 && (
               <div className="text-[10px] text-slate-500 space-y-0.5">
                 <div className="font-semibold text-slate-600 mb-1">Best parameters:</div>
                 {Object.entries(r.best_params).map(([k, v]) => (
                   <div key={k} className="flex justify-between">
                     <span>{k}</span>
-                    <span className="font-mono">{typeof v === "number" ? v.toFixed(3) : String(v)}</span>
+                    <span className="font-mono">
+                      {typeof v === "number" ? v.toFixed(3) : String(v)}
+                    </span>
                   </div>
                 ))}
               </div>
             )}
 
+            {/* Progress bar */}
             <div className="space-y-1">
               <div className="flex justify-between text-[10px] text-slate-400">
                 <span>Progress</span>
@@ -391,7 +441,7 @@ function ComputationTab({ results, nCallsTarget }: { results: ResultEntry[]; nCa
               <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-blue-500 transition-all rounded-full"
-                  style={{ width: `${pct}%` }}
+                  style={{ width: `${progressPct}%` }}
                 />
               </div>
             </div>
@@ -401,6 +451,7 @@ function ComputationTab({ results, nCallsTarget }: { results: ResultEntry[]; nCa
     </div>
   );
 }
+
 function EmptyState({ icon, title, description }: { icon: string; title: string; description: string }) {
   return (
     <div className="flex flex-col items-center justify-center h-64 space-y-3">

@@ -594,7 +594,7 @@ def run_optimise_condition(
     n_calls             = int(step.get("n_calls") or session.optimiser_config.n_calls)
     n_init              = int(step.get("n_initial_points") or session.optimiser_config.n_initial_points)
     conditions          = {condition_label: condition_value}
-    optimiser_name      = session.optimiser_config.name
+    optimiser_name      = step.get("optimiser_name") or session.optimiser_config.name
 
     if not free_params:
         session.live_event_queue.append(ExecutionEvent(
@@ -931,6 +931,7 @@ def execute_plan_step(
         plot_code = step.get("plot_code", "")
         if not plot_code:
             plot_code = _default_summary_plot_code()
+
         try:
             fig_path = generate_plot(session, plot_code)
             session.show_plotter_image = fig_path
@@ -942,15 +943,53 @@ def execute_plan_step(
                 payload={},
             ))
             return {"status": "ok", "figure_path": fig_path}
-        except RuntimeError as e:
-            session.live_event_queue.append(ExecutionEvent(
-                event_type="plotter_fail",
-                message=f"Figure generation failed: {e}",
-                equipment="reporting",
-                category="reporting",
-                payload={},
-            ))
-            return {"status": "error", "message": str(e)}
+        except RuntimeError as first_err:
+            # Custom plot code failed — fall back to the default summary plot
+            if plot_code != _default_summary_plot_code():
+                session.live_event_queue.append(ExecutionEvent(
+                    event_type="plotter_warn",
+                    message="Custom plot failed — generating default summary figure.",
+                    equipment="reporting",
+                    category="reporting",
+                    payload={},
+                ))
+                try:
+                    fig_path = generate_plot(session, _default_summary_plot_code())
+                    session.show_plotter_image = fig_path
+                    session.agent_state.messages.append({
+                        "role":    "assistant",
+                        "content": (
+                            "⚠️ The custom plot code encountered an error. "
+                            "Here is the default summary figure instead:\n\n"
+                            f"![Summary](/api/plot/{session.session_id})"
+                        ),
+                    })
+                    session.live_event_queue.append(ExecutionEvent(
+                        event_type="plotter_done",
+                        message="Default figure ready.",
+                        equipment="reporting",
+                        category="reporting",
+                        payload={},
+                    ))
+                    return {"status": "ok", "figure_path": fig_path, "fallback": True}
+                except RuntimeError as fallback_err:
+                    session.live_event_queue.append(ExecutionEvent(
+                        event_type="plotter_fail",
+                        message=f"Figure generation failed: {fallback_err}",
+                        equipment="reporting",
+                        category="reporting",
+                        payload={},
+                    ))
+                    return {"status": "error", "message": str(fallback_err)}
+            else:
+                session.live_event_queue.append(ExecutionEvent(
+                    event_type="plotter_fail",
+                    message=f"Figure generation failed: {first_err}",
+                    equipment="reporting",
+                    category="reporting",
+                    payload={},
+                ))
+                return {"status": "error", "message": str(first_err)}
 
     if kind == "analyse_data":
         session.live_event_queue.append(ExecutionEvent(
@@ -1106,8 +1145,25 @@ def build_execution_plan_from_tool_calls(session, tool_calls: List[dict]) -> Lis
         elif name == "plan_workflow":
             steps = args.get("steps", [])
             for step in steps:
+                # ── Defensive defaults ────────────────────────────────────────────
+                if not step.get("label"):
+                    kind  = step.get("kind", "step")
+                    cond  = step.get("condition_label", "")
+                    val   = step.get("condition_value", "")
+                    opt   = step.get("optimiser_name", "")
+                    if kind == "optimise_condition" and cond:
+                        opt_display = f" [{opt}]" if opt else ""
+                        step["label"] = f"Optimise {cond}={val}{opt_display}"
+                    elif kind == "synthesise":
+                        step["label"] = "Synthesise sample"
+                    elif kind == "characterise":
+                        step["label"] = "Characterise sample"
+                    else:
+                        step["label"] = kind.replace("_", " ").title()
+
                 if not step.get("step_id"):
                     step["step_id"] = str(__import__("uuid").uuid4())[:8]
+
                 raw_id = step.get("instrument_id") or step.get("instrument") or step.get("kind") or "unknown"
                 step["instrument_id"] = str(raw_id)
                 step.setdefault("status", "pending")
@@ -1128,7 +1184,8 @@ def build_execution_plan_from_tool_calls(session, tool_calls: List[dict]) -> Lis
                         step["n_calls"] = session.optimiser_config.n_calls
                     if not step.get("n_initial_points"):
                         step["n_initial_points"] = session.optimiser_config.n_initial_points
-                    step["optimiser_name"] = session.optimiser_config.name
+                    if not step.get("optimiser_name"):
+                        step["optimiser_name"] = session.optimiser_config.name
 
                 plan.append(step)
 
@@ -1226,12 +1283,25 @@ def build_dynamic_timeline(session) -> List[dict]:
         })
 
     if session.sample_registry:
-        n_synthesised = sum(1 for s in session.sample_registry if s.status == "prepared")
-        n_tested      = sum(1 for s in session.sample_registry if s.status == "tested")
-        items.append({
-            "label":  f"Samples: {n_synthesised} synthesised, {n_tested} characterised",
-            "status": "done",
-        })
+        # Count all successfully synthesised samples (prepared OR subsequently tested)
+        n_synthesised = sum(
+            1 for s in session.sample_registry
+            if s.status in ("prepared", "tested")
+        )
+        # Count only those that have been characterised (have test results)
+        n_characterised = sum(
+            1 for s in session.sample_registry
+            if s.status == "tested"
+        )
+        # Count synthesis failures separately
+        n_failed = sum(
+            1 for s in session.sample_registry
+            if s.status == "failed"
+        )
+        label = f"Samples: {n_synthesised} synthesised, {n_characterised} characterised"
+        if n_failed > 0:
+            label += f", {n_failed} failed"
+        items.append({"label": label, "status": "done"})
 
     if session.show_plotter_image:
         items.append({"label": "Figure generated", "status": "done"})

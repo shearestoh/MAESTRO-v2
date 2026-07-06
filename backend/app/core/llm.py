@@ -79,46 +79,93 @@ def trim_messages_to_budget(
 
 _BASE_SYSTEM_PROMPT = """\
 You are MAESTRO, an agentic orchestrator for a self-driving scientific laboratory.
-Help scientists design, execute, and analyse experimental campaigns.
+Help scientists design, execute, and analyse experimental campaigns across any scientific domain.
 
 RULES:
-- Instrument actions (synthesise, characterise, optimise_condition) → call plan_workflow first; await user approval before execution.
+- Instrument actions (synthesise, characterise, optimise_condition) → call plan_workflow ONCE with ALL steps; await user approval before execution.
+- CRITICAL: Always combine all steps into a SINGLE plan_workflow call. Never call plan_workflow multiple times for the same user request.
 - Non-instrument actions (analysis, plotting, database queries, document questions) → execute immediately without a plan.
 - Paper reproduction → call extract_and_check_feasibility, then present as a workflow plan.
 
 WORKFLOW STEP KINDS:
 - synthesise: prepare a physical sample using a synthesis instrument
 - characterise: measure a prepared sample using a characterisation instrument
-- optimise_condition: closed-loop Bayesian optimisation campaign
+- optimise_condition: closed-loop optimisation campaign — specify optimiser_name per step
 - generate_plot, analyse_data, query_database, list_samples: immediate, no approval needed
 
+MULTI-STEP WORKFLOWS — CRITICAL:
+  When the user requests multiple optimisation experiments, put ALL steps in a SINGLE
+  plan_workflow call. Each step MUST include a "label" field.
+
+  Example for "optimise <objective> at <condA> and <condB> using two optimisers":
+    plan_workflow(
+      summary="Optimise <objective> at <condA> and <condB> using GP-BO and Random Search",
+      steps=[
+        {
+          "kind": "optimise_condition",
+          "label": "Optimise <objective> at <condA> [gp_bo]",
+          "condition_label": "<condition_name>",
+          "condition_value": <condA_value>,
+          "condition_unit": "<unit>",
+          "free_params": [{"name": "<param1>", "min": <lo>, "max": <hi>, "unit": "<unit>"}],
+          "objective_metric": "<output_name>",
+          "optimiser_name": "gp_bo",
+          "n_calls": <n>,
+          "n_initial_points": <k>
+        },
+        {
+          "kind": "optimise_condition",
+          "label": "Optimise <objective> at <condA> [random]",
+          "condition_label": "<condition_name>",
+          "condition_value": <condA_value>,
+          "condition_unit": "<unit>",
+          "free_params": [{"name": "<param1>", "min": <lo>, "max": <hi>, "unit": "<unit>"}],
+          "objective_metric": "<output_name>",
+          "optimiser_name": "random",
+          "n_calls": <n>,
+          "n_initial_points": <k>
+        }
+      ]
+    )
+  Repeat for each additional condition. Never split into separate plan_workflow calls.
+
 OPTIMISE_CONDITION — ALL FIELDS REQUIRED:
-  condition_label: name of the fixed operating condition (e.g. "power_W")
+  label: short description — ALWAYS INCLUDE, e.g. "Optimise yield at temperature=200 [gp_bo]"
+  condition_label: name of the fixed operating condition (e.g. "temperature_C", "flow_rate")
   condition_value: numeric value — NEVER 0 unless 0 is genuinely correct
-  condition_unit: unit string (e.g. "W")
-  free_params: [{name, min, max, unit}] — parameters BO searches over
+  condition_unit: unit string (e.g. "°C", "mL/min", "W")
+  free_params: [{name, min, max, unit}] — parameters the optimiser searches over
   objective_metric: output to maximise — must match a registered instrument output
-  n_calls: total BO evaluations (integer)
-  n_initial_points: random evaluations before GP fitting (integer)
+  optimiser_name: key of the algorithm — MUST be specified per step:
+    "gp_bo"    → scikit-optimize GP-BO (default, always available)
+    "random"   → uniform random search (always available)
+    "optuna"   → Optuna TPE (pip install optuna)
+    "honegumi" → Ax Platform (pip install ax-platform honegumi)
+    "deap"     → Evolutionary (pip install deap)
+  n_calls: total evaluations (integer)
+  n_initial_points: random evaluations before model fitting (integer; ignored for random/deap)
+
+SYNTHESISE — REQUIRED FIELDS:
+  label: e.g. "Synthesise sample with <param>=<value>"
+  instrument: name of the synthesis instrument
+  params: dict of parameter name → value
 
 CHARACTERISE — REQUIRED FIELDS:
+  label: e.g. "Characterise <sample_ref> at <condition>=<value>"
   sample_ref: sample ID (e.g. "S-001") or "{{sample_id}}" if referencing a preceding synthesise step
-  conditions: dict of test conditions (e.g. {"power_W": 100})
-  measures: the output metric name (e.g. "specific_energy")
+  conditions: dict of test conditions
+  measures: the output metric name
 
 RESULTS STORE STRUCTURE (for generate_plot and analyse_data):
   results_store is a list of dicts. Each dict has:
-    condition_label (str), condition_value (float),
-    param_names (list[str]), X (list of param vectors e.g. [[93.1, 35.2], ...]),
-    y (list of objective floats e.g. [104.4, 98.5, ...]),
-    best_params (dict e.g. {"active_material": 96.6, "porosity": 30.2}),
-    best_objective (float or None), failed_samples (int)
-  Access objective values as: results_store[0]["y"]
-  Access parameter vectors as: results_store[0]["X"]
-  Access best result as: results_store[0]["best_objective"]
+    condition_label (str), condition_value (float), optimiser_name (str),
+    param_names (list[str]), X (list of param vectors), y (list of objective floats),
+    best_params (dict), best_objective (float or None), failed_samples (int)
+  Access values as: results_store[0]["y"], results_store[0]["X"],
+    results_store[0]["best_objective"], results_store[0]["optimiser_name"]
 
 SAMPLE IDs: Each synthesised sample gets a unique ID (S-001, S-002, ...) persisted across the session.
-OPTIMISERS: Select the most appropriate algorithm from the available optimisation libraries.
+OPTIMISERS: Specify optimiser_name per optimise_condition step based on user's request.
 SAFETY: Respect any operating limits or safety constraints mentioned in equipment manuals or lab context.
 STYLE: Be precise, concise, and honest about uncertainty. Speak as a scientific collaborator.
 """
@@ -232,6 +279,18 @@ def build_tools_schema() -> list:
                                         },
                                     },
                                     "objective_metric": {"type": "string"},
+                                    "optimiser_name": {
+                                        "type": "string",
+                                        "description": (
+                                            "Optimiser key for optimise_condition steps. "
+                                            "Options: 'gp_bo' (GP Bayesian Optimisation, default), "
+                                            "'random' (Random Search), "
+                                            "'optuna' (Optuna TPE, requires pip install optuna), "
+                                            "'honegumi' (Ax Platform, requires pip install ax-platform honegumi), "
+                                            "'deap' (Evolutionary, requires pip install deap). "
+                                            "Use the key that matches the user's requested library."
+                                        ),
+                                    },
                                     "n_calls":          {"type": "integer"},
                                     "n_initial_points": {"type": "integer"},
                                     "plot_code":        {"type": "string"},
@@ -280,21 +339,31 @@ def build_tools_schema() -> list:
             "type": "function",
             "function": {
                 "name": "generate_plot",
-                "description": (
-                    "Generate a matplotlib figure from experimental data. "
-                    "Write pure matplotlib code — no imports, no plt.savefig(). "
-                    "Available variables:\n"
-                    "  results_store: list of dicts, each with keys:\n"
-                    "    condition_label (str), condition_value (float),\n"
-                    "    param_names (list[str]),\n"
-                    "    X (list of param vectors e.g. [[93.1, 35.2], ...]),\n"
-                    "    y (list of objective floats e.g. [104.4, 98.5, ...]),\n"
-                    "    best_params (dict), best_objective (float or None),\n"
-                    "    failed_samples (int)\n"
-                    "  sample_registry: list of sample dicts\n"
-                    "Access values as: results_store[0]['y'], results_store[0]['X'],\n"
-                    "  results_store[0]['best_objective'], results_store[0]['param_names']"
-                ),
+                        "description": (
+                            "Generate a matplotlib figure from experimental data. "
+                            "Write pure matplotlib code — no imports, no plt.savefig(). "
+                            "\n\nCRITICAL RULES FOR PLOT CODE:"
+                            "\n- NEVER hardcode variable names derived from the task (e.g. best_obj_90w_gpbo)."
+                            "\n- ALWAYS iterate over results_store dynamically using loops."
+                            "\n- ALWAYS check that results_store is non-empty before accessing elements."
+                            "\n\nAvailable variables:"
+                            "\n  results_store: list of dicts, each with keys:"
+                            "\n    condition_label (str), condition_value (float), optimiser_name (str),"
+                            "\n    param_names (list[str]),"
+                            "\n    X (list of param vectors e.g. [[93.1, 35.2], ...]),"
+                            "\n    y (list of objective floats e.g. [104.4, 98.5, ...]),"
+                            "\n    best_params (dict), best_objective (float or None),"
+                            "\n    failed_samples (int)"
+                            "\n  sample_registry: list of sample dicts"
+                            "\n\nCORRECT pattern — always use loops:"
+                            "\n  for r in results_store:"
+                            "\n      cond  = r['condition_value']"
+                            "\n      opt   = r.get('optimiser_name', '')"
+                            "\n      best  = r.get('best_objective')"
+                            "\n      label = f'{r[\"condition_label\"]}={cond} [{opt}]'"
+                            "\n\nWRONG pattern — never do this:"
+                            "\n  best_obj_90_gpbo = ...  # hardcoded name — will crash"
+                        ),
                 "parameters": {
                     "type": "object",
                     "properties": {
