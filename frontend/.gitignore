@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# .gitignore additions
+lab_config.json
+maestro.db
+backend/lab_documents/
+*.db
+*.sqlite

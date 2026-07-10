@@ -48,7 +48,8 @@ def _db_connection(read_only: bool = False):
     if read_only:
         con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, check_same_thread=False)
     else:
-        con = sqlite3.connect(DB_PATH)
+        con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con.row_factory = sqlite3.Row  # ← enables dict-like access
     try:
         yield con
     finally:
@@ -135,22 +136,16 @@ def write_evaluation(
 
 
 def query_database(sql: str, max_rows: int = 100) -> dict:
-    sql = sql.strip()
+    sql = sql.strip().rstrip(";")
     if not sql.upper().startswith("SELECT"):
         return {"status": "error", "message": "Only SELECT statements are permitted."}
-    if "LIMIT" not in sql.upper():
-        sql = f"{sql} LIMIT {max_rows}"
+    safe_sql = f"SELECT * FROM ({sql}) AS _q LIMIT {max_rows}"
     try:
         with _db_connection(read_only=True) as con:
-            cur = con.execute(sql)
+            cur = con.execute(safe_sql)
             columns = [d[0] for d in cur.description] if cur.description else []
             rows    = cur.fetchall()
-        return {
-            "status":  "ok",
-            "columns": columns,
-            "rows":    [list(r) for r in rows],
-            "n_rows":  len(rows),
-        }
+        return {"status": "ok", "columns": columns, "rows": [list(r) for r in rows], "n_rows": len(rows)}
     except sqlite3.OperationalError as e:
         return {"status": "error", "message": f"Database error: {e}"}
     except Exception as e:
@@ -269,14 +264,16 @@ def update_protocol_notes(protocol_id: str, notes: str) -> None:
         )
         con.commit()
 
+_PROTOCOL_FIELD_COLS = {"notes", "name", "description", "results_summary"}
+
 def update_protocol_field(protocol_id: str, field: str, value: str) -> bool:
-    """Update a single text field on a protocol. Only safe fields are permitted."""
-    allowed = {"notes", "name", "description", "results_summary"}
-    if field not in allowed:
+    if field not in _PROTOCOL_FIELD_COLS:
         return False
+    col_map = {f: f for f in _PROTOCOL_FIELD_COLS}
+    col = col_map[field]
     with _db_connection() as con:
         cur = con.execute(
-            f"UPDATE protocols SET {field} = ? WHERE protocol_id = ?",
+            f"UPDATE protocols SET {col} = ? WHERE protocol_id = ?", 
             (value, protocol_id),
         )
         con.commit()

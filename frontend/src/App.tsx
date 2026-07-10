@@ -1,7 +1,6 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useEffect }       from "react";
 import { Sidebar }         from "@/components/layout/Sidebar";
-import { TopBar }          from "@/components/layout/TopBar";
 import { Dashboard }       from "@/pages/Dashboard";
 import { LabSetup }        from "@/pages/LabSetup";
 import { LabNotebook }     from "@/pages/LabNotebook";
@@ -35,11 +34,10 @@ function AppShell() {
     <div className="flex h-screen overflow-hidden bg-slate-50">
       <Sidebar />
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-        <TopBar />
         {error && (
           <div className="bg-red-50 border-b border-red-200 px-4 py-2 flex items-center justify-between shrink-0">
             <span className="text-xs text-red-600">{error}</span>
-            <button onClick={clearErr} className="text-xs text-red-500 hover:underline">
+            <button onClick={clearErr} className="text-xs text-red-500 hover:underline ml-4">
               Dismiss
             </button>
           </div>
