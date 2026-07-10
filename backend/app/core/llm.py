@@ -5,12 +5,12 @@ Context strategy:
   Always injected: base rules, instrument registry, lab identity,
   document title list (with type), optimisation library, database schema.
 
-  Retrieved on demand (when documents are loaded):
-  Relevant passages are retrieved for every user message when documents
-  are present — no keyword gate. The LLM decides what to do with the context.
-  If no relevant passages are found, nothing is injected.
+  Retrieved on demand: relevant passages from loaded documents are retrieved
+  for every user message when documents are present — no keyword gate.
 """
 from __future__ import annotations
+
+import json
 
 from openai import OpenAI
 
@@ -48,30 +48,22 @@ RULES:
 - Paper/case study reproduction → call extract_and_check_feasibility, then the extracted campaign will be presented as a workflow plan.
 
 CAPABILITY AWARENESS — ALWAYS CHECK BEFORE PROPOSING ANY WORKFLOW:
-  Before proposing any workflow (from user request, paper, or database), verify the registered instruments can execute it:
-  1. PARAMETERS: Does any registered instrument control the requested parameters? If not, state what is missing.
-  2. OUTPUTS: Does any registered instrument measure the requested objective? If not, state what is missing.
-  3. RESOURCES: Query the resources table to check consumable stock before experiments that consume materials.
-  4. HISTORY: Query the protocols table to find relevant past experiments before starting new ones.
-  5. MANUALS: If equipment manuals are in the Knowledge Library (shown in RETRIEVED DOCUMENT CONTEXT), check safety limits and operating ranges before proposing parameter values.
-  If the lab CANNOT execute the request with registered instruments, explain clearly what is missing and what would need to be added. NEVER propose a workflow for parameters or objectives that no registered instrument handles.
+  Before proposing any workflow, verify the registered instruments can execute it:
+  1. PARAMETERS: Does any registered instrument control the requested parameters?
+  2. OUTPUTS: Does any registered instrument measure the requested objective?
+  3. RESOURCES: Query the resources table to check consumable stock before experiments.
+  4. HISTORY: Query the protocols table to find relevant past experiments.
+  5. MANUALS: If equipment manuals appear in RETRIEVED DOCUMENT CONTEXT, check safety limits before proposing parameter values.
+  If the lab CANNOT execute the request, explain what is missing. NEVER propose a workflow for parameters or objectives that no registered instrument handles.
 
-DATABASE RETRIEVAL — USE THESE QUERIES:
+DATABASE RETRIEVAL:
   Resource inventory:  SELECT * FROM resources
   Protocols/history:   SELECT protocol_id, name, description, optimiser_used, results_summary, created_at FROM protocols ORDER BY created_at DESC
   Past results:        SELECT condition_name, condition_value, objective_name, objective_value, parameters FROM evaluations ORDER BY timestamp DESC LIMIT 20
   Sample notebook:     Use the list_samples tool
 
-MULTI-STEP WORKFLOWS — CRITICAL:
+MULTI-STEP WORKFLOWS:
   Put ALL steps in a SINGLE plan_workflow call. Each step MUST include a "label" field.
-  Example for "optimise <objective> at <condA> and <condB> using two optimisers":
-    plan_workflow(summary="...", steps=[
-      {"kind": "optimise_condition", "label": "Optimise <objective> at <condA> [gp_bo]",
-       "condition_label": "<name>", "condition_value": <A>, "condition_unit": "<unit>",
-       "free_params": [{"name": "<p>", "min": <lo>, "max": <hi>, "unit": "<u>"}],
-       "objective_metric": "<out>", "optimiser_name": "gp_bo", "n_calls": <n>, "n_initial_points": <k>},
-      ... (repeat for each condition × optimiser combination)
-    ])
 
 OPTIMISE_CONDITION — ALL FIELDS REQUIRED:
   label, condition_label, condition_value, condition_unit,
@@ -85,13 +77,12 @@ CHARACTERISE: label, sample_ref, conditions {dict}, measures
 RESULTS STORE (for generate_plot / analyse_data):
   results_store[i] keys: condition_label, condition_value, optimiser_name,
   param_names, X (param vectors), y (objective values), best_params, best_objective, failed_samples
-  Always use loops — never hardcode variable names from the task.
-  Always call print() for every computed value in analyse_data.
+  Always inspect structure before using. Always use loops. Always call print() for every value in analyse_data.
 
 SAMPLE IDs: S-001, S-002, ... persisted across the session.
 OPTIMISERS: specify optimiser_name per step. Default: "gp_bo".
 SAFETY: Respect limits stated in equipment manuals (shown in RETRIEVED DOCUMENT CONTEXT when available).
-STYLE: Precise, concise, honest about uncertainty. Scientific collaborator.
+STYLE: Precise, concise, honest about uncertainty.
 """
 
 
@@ -113,10 +104,9 @@ def trim_messages_to_budget(
     kept        = system_msgs + recent
     budget      = max_chars - _total_chars(kept)
     for msg in reversed(older):
-        msg_len = len(str(msg.get("content", "")))
-        if budget - msg_len > 0:
+        if budget - len(str(msg.get("content", ""))) > 0:
             kept.insert(len(system_msgs), msg)
-            budget -= msg_len
+            budget -= len(str(msg.get("content", "")))
     sys_part   = [m for m in kept if m.get("role") == "system"]
     other_part = [m for m in kept if m.get("role") != "system"]
     try:
@@ -147,12 +137,10 @@ def build_dynamic_system_prompt() -> str:
                 lines.append(f"  {lib.name} [{caps}]")
             opt_context = "\n".join(lines)
 
-    # Document registry — titles, type, and basic metadata
-    # Full content retrieved on demand via _retrieve_doc_context()
     doc_registry = ""
     if DOCUMENTS:
         library_entries = {e.document_id: e for e in get_document_library()}
-        lines = ["\nKNOWLEDGE LIBRARY:"]
+        lines = ["\nKNOWLEDGE LIBRARY (full content retrieved on demand):"]
         for doc in DOCUMENTS.values():
             meta = []
             if doc.year:
@@ -179,8 +167,8 @@ def build_dynamic_system_prompt() -> str:
 
 def _retrieve_doc_context(session, query: str, max_chars: int = 3500) -> str:
     """
-    Retrieve relevant passages from all loaded documents for the given query.
-    No keyword gate — called whenever documents are present.
+    Retrieve relevant passages from loaded documents for the given query.
+    Called for every user message when documents are present.
     Returns empty string if nothing relevant is found.
     """
     from app.core.documents import DOCUMENTS, retrieve_relevant_passages
@@ -188,7 +176,6 @@ def _retrieve_doc_context(session, query: str, max_chars: int = 3500) -> str:
     if not DOCUMENTS:
         return ""
 
-    # Prioritise the active document, then search others
     doc_ids = []
     if session.active_document_id and session.active_document_id in DOCUMENTS:
         doc_ids.append(session.active_document_id)
@@ -196,10 +183,9 @@ def _retrieve_doc_context(session, query: str, max_chars: int = 3500) -> str:
         if doc_id not in doc_ids:
             doc_ids.append(doc_id)
 
-    # Cap at 3 documents to stay within context budget
-    doc_ids = doc_ids[:3]
+    doc_ids        = doc_ids[:3]
     budget_per_doc = max_chars // len(doc_ids)
-    chunks = []
+    chunks         = []
 
     for doc_id in doc_ids:
         doc = DOCUMENTS[doc_id]
@@ -214,18 +200,15 @@ def _retrieve_doc_context(session, query: str, max_chars: int = 3500) -> str:
         except Exception:
             pass
 
-    if not chunks:
-        return ""
-
-    return "RETRIEVED DOCUMENT CONTEXT:\n" + "\n".join(chunks)
+    return ("RETRIEVED DOCUMENT CONTEXT:\n" + "\n".join(chunks)) if chunks else ""
 
 
 def call_llm(messages: list, tools=None, tool_choice: str = "auto"):
     safe_messages = trim_messages_to_budget(messages)
     kwargs: dict = {
-        "model":       MODEL_NAME,
-        "messages":    safe_messages,
-        "max_tokens":  _MAX_OUTPUT_TOKENS,
+        "model":      MODEL_NAME,
+        "messages":   safe_messages,
+        "max_tokens": _MAX_OUTPUT_TOKENS,
         "temperature": 0.2,
     }
     if tools is not None:
@@ -242,9 +225,9 @@ def build_tools_schema() -> list:
             "function": {
                 "name": "plan_workflow",
                 "description": (
-                    "Propose a multi-step workflow plan for tasks that involve using lab instruments. "
-                    "All steps go in a single call. The plan is shown to the user for approval before execution. "
-                    "Only call this when the registered instruments can handle the requested parameters and objectives."
+                    "Propose a multi-step workflow plan for tasks involving lab instruments. "
+                    "All steps in a single call. Shown to user for approval before execution. "
+                    "Only call this when registered instruments can handle the requested parameters and objectives."
                 ),
                 "parameters": {
                     "type": "object",
@@ -264,7 +247,7 @@ def build_tools_schema() -> list:
                                             "analyse_data",
                                         ],
                                     },
-                                    "label":            {"type": "string", "description": "REQUIRED. Short human-readable label."},
+                                    "label":            {"type": "string"},
                                     "instrument":       {"type": "string"},
                                     "params":           {"type": "object"},
                                     "produces":         {"type": "string"},
@@ -287,10 +270,7 @@ def build_tools_schema() -> list:
                                         },
                                     },
                                     "objective_metric": {"type": "string"},
-                                    "optimiser_name": {
-                                        "type": "string",
-                                        "description": "gp_bo | random | optuna | honegumi | deap",
-                                    },
+                                    "optimiser_name":   {"type": "string"},
                                     "n_calls":          {"type": "integer"},
                                     "n_initial_points": {"type": "integer"},
                                     "plot_code":        {"type": "string"},
@@ -312,15 +292,15 @@ def build_tools_schema() -> list:
                 "name": "extract_and_check_feasibility",
                 "description": (
                     "Extract a structured experimental campaign from an uploaded scientific paper "
-                    "and check whether the registered lab instruments can reproduce it. "
-                    "Use this when the user wants to reproduce, replicate, or adapt a result from a paper."
+                    "and check whether registered lab instruments can reproduce it. "
+                    "Use when the user wants to reproduce or adapt a result from a paper."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "case_name": {
                             "type": "string",
-                            "description": "The specific case study, figure, or experiment to extract from the paper",
+                            "description": "The specific case study, figure, or experiment to extract",
                         },
                     },
                     "required": ["case_name"],
@@ -331,7 +311,7 @@ def build_tools_schema() -> list:
             "type": "function",
             "function": {
                 "name": "list_samples",
-                "description": "List all samples currently in the lab sample inventory (synthesised and characterised).",
+                "description": "List all samples in the lab sample inventory.",
                 "parameters": {"type": "object", "properties": {}},
             },
         },
@@ -340,19 +320,12 @@ def build_tools_schema() -> list:
             "function": {
                 "name": "generate_plot",
                 "description": (
-                    "Generate a matplotlib figure from experimental data. "
+                    "Generate a matplotlib figure from experimental data.\n"
                     "Write pure matplotlib code — no imports, no plt.savefig().\n"
-                    "Available variables:\n"
-                    "  results_store: list of dicts, each with keys:\n"
-                    "    condition_label (str), condition_value (float), optimiser_name (str),\n"
-                    "    param_names (list[str]), X (list[list[float]]), y (list[float]),\n"
-                    "    best_params (dict), best_objective (float|None), failed_samples (int)\n"
-                    "  sample_registry: list of sample dicts\n"
-                    "RULES:\n"
-                    "  - Always inspect results_store structure before plotting — never assume shape.\n"
-                    "  - Use loops over results_store, never hardcode condition or parameter names.\n"
-                    "  - Handle empty results_store gracefully (show a 'No data' message).\n"
-                    "  - Choose the most informative plot type for the data available."
+                    "Available: results_store (list of dicts), sample_registry (list of dicts).\n"
+                    "results_store[i] keys: condition_label, condition_value, optimiser_name, "
+                    "param_names, X, y, best_params, best_objective, failed_samples.\n"
+                    "Always inspect structure before plotting. Use loops. Handle empty data gracefully."
                 ),
                 "parameters": {
                     "type": "object",
@@ -369,9 +342,9 @@ def build_tools_schema() -> list:
             "function": {
                 "name": "analyse_data",
                 "description": (
-                    "Run statistical analysis using numpy/scipy. Every computed value MUST be printed.\n"
-                    "Available: results_store (same structure as generate_plot), sample_registry.\n"
-                    "Always inspect the data structure before computing — never assume field names."
+                    "Run statistical analysis using numpy/scipy. Every value MUST be printed.\n"
+                    "Available: results_store, sample_registry (same structure as generate_plot).\n"
+                    "Always inspect data structure before computing."
                 ),
                 "parameters": {
                     "type": "object",
@@ -388,11 +361,9 @@ def build_tools_schema() -> list:
             "function": {
                 "name": "query_database",
                 "description": (
-                    "Run a read-only SQL SELECT query against the lab database. Use for:\n"
-                    "  - Experimental results: SELECT * FROM evaluations\n"
-                    "  - Consumable inventory: SELECT * FROM resources\n"
-                    "  - Past protocols and history: SELECT * FROM protocols\n"
-                    "Only SELECT statements are permitted."
+                    "Run a read-only SQL SELECT query against the lab database.\n"
+                    "Tables: evaluations (results), resources (consumables), protocols (history).\n"
+                    "Only SELECT statements permitted."
                 ),
                 "parameters": {
                     "type": "object",
@@ -420,114 +391,115 @@ def build_lab_context_message(session) -> dict:
     if session.extracted_campaign:
         c = session.extracted_campaign
         campaign_text = (
-            f" | ACTIVE CAMPAIGN: '{c.title}' "
+            f" | CAMPAIGN: '{c.title}' "
             f"(objective: {c.objective_metric}, "
             f"params: {[p['name'] for p in c.parameter_space]})"
         )
 
-    doc_context_text = ""
+    doc_text = ""
     if session.active_document_id:
         from app.core.documents import DOCUMENTS
         doc = DOCUMENTS.get(session.active_document_id)
         if doc:
-            meta_lines = []
+            meta = []
             if doc.authors:
-                meta_lines.append(f"Authors: {', '.join(doc.authors[:3])}")
+                meta.append(f"Authors: {', '.join(doc.authors[:3])}")
             if doc.year:
-                meta_lines.append(f"Year: {doc.year}")
-            if doc.doi:
-                meta_lines.append(f"DOI: {doc.doi}")
-            section_toc = ""
+                meta.append(f"Year: {doc.year}")
+            toc = ""
             if doc.sections:
                 toc_lines = [f"\nSections ({len(doc.sections)}):"]
-                for i, s in enumerate(doc.sections[:15]):
-                    indent = "  " * min(s.level - 1, 2)
-                    toc_lines.append(f"  {indent}{i + 1}. {s.heading}")
-                section_toc = "\n".join(toc_lines)
-            doc_context_text = (
+                for i, s in enumerate(doc.sections[:12]):
+                    toc_lines.append(f"  {'  ' * min(s.level-1,2)}{i+1}. {s.heading}")
+                toc = "\n".join(toc_lines)
+            doc_text = (
                 f"\nACTIVE DOCUMENT: {doc.title or doc.filename}"
-                + ("\n" + "\n".join(meta_lines) if meta_lines else "")
+                + (f"\n{'; '.join(meta)}" if meta else "")
                 + f"\n{len(doc.sections)} sections | {len(doc.figures)} figures | {len(doc.tables)} tables"
-                + section_toc
+                + toc
             )
 
     return {
         "role": "system",
         "content": (
-            f"[LAB STATE] Time: {time_str} ({office_note}) | "
+            f"[LAB STATE] {time_str} ({office_note}) | "
             f"Evaluations: {total_evals} | "
-            f"{len(TOOL_REGISTRY.list_all())} instruments registered"
-            f"{campaign_text}"
-            f"{doc_context_text}"
+            f"{len(TOOL_REGISTRY.list_all())} instruments"
+            f"{campaign_text}{doc_text}"
         ),
     }
 
 
-def _repair_tool_call_chain(messages: list) -> list:
-    import json as _json
-    responded_ids: set[str] = set()
-    for msg in messages:
-        if msg.get("role") == "tool":
-            tc_id = msg.get("tool_call_id")
-            if tc_id:
-                responded_ids.add(tc_id)
-    injections: list[tuple[int, dict]] = []
-    for i, msg in enumerate(messages):
+def _ensure_tool_calls_answered(messages: list) -> list:
+    """
+    Return a copy of messages with synthetic tool responses injected for any
+    unanswered tool_calls. Operates on the copy only — never mutates the original.
+    This ensures the message chain sent to the API is always valid.
+    """
+    result      = list(messages)
+    responded   = {
+        m["tool_call_id"]
+        for m in result
+        if m.get("role") == "tool" and m.get("tool_call_id")
+    }
+    injections  = []
+    for i, msg in enumerate(result):
         if msg.get("role") != "assistant":
             continue
         for tc in msg.get("tool_calls", []):
             tc_id   = tc.get("id")
-            tc_name = tc.get("function", {}).get("name", "unknown_tool")
-            if tc_id and tc_id not in responded_ids:
+            tc_name = tc.get("function", {}).get("name", "unknown")
+            if tc_id and tc_id not in responded:
                 injections.append((i + 1, {
                     "role":         "tool",
                     "tool_call_id": tc_id,
                     "name":         tc_name,
-                    "content":      _json.dumps({
+                    "content":      json.dumps({
                         "status":  "completed",
                         "message": f"Tool '{tc_name}' executed.",
                     }),
                 }))
-                responded_ids.add(tc_id)
+                responded.add(tc_id)
     for insert_idx, tool_msg in reversed(injections):
-        messages.insert(insert_idx, tool_msg)
-    return messages
+        result.insert(insert_idx, tool_msg)
+    return result
 
 
 def llm_plan(session) -> dict:
-    dynamic_system = build_dynamic_system_prompt()
-    messages       = list(session.agent_state.messages)
+    """
+    Build the call-time message list, inject context, call the API,
+    and append the result to session.agent_state.messages.
 
-    # Replace or prepend the system message
+    _ensure_tool_calls_answered operates on a COPY only.
+    session.agent_state.messages is mutated only by the final append.
+    """
+    dynamic_system = build_dynamic_system_prompt()
+
+    messages = list(session.agent_state.messages)
+
     if messages and messages[0].get("role") == "system":
         messages[0] = {"role": "system", "content": dynamic_system}
     else:
         messages.insert(0, {"role": "system", "content": dynamic_system})
 
-    # Get the last user message for RAG retrieval
     last_user_msg = next(
         (m.get("content", "") for m in reversed(session.agent_state.messages)
          if m.get("role") == "user"),
         "",
     )
-
-    # Retrieve relevant document context whenever documents are loaded.
-    # No keyword gate — the LLM decides what to do with the context.
-    # Equipment status is set to show the knowledge indicator in the UI.
     if last_user_msg:
         from app.core.documents import DOCUMENTS
         if DOCUMENTS:
-            session.equipment_status = EquipmentStatusModel(knowledge=True)
-            doc_context = _retrieve_doc_context(session, query=last_user_msg, max_chars=3500)
+            doc_context = _retrieve_doc_context(session, query=last_user_msg)
             if doc_context:
                 messages.append({"role": "system", "content": doc_context})
-            session.equipment_status = EquipmentStatusModel()
 
-    augmented    = messages + [build_lab_context_message(session)]
-    augmented    = _repair_tool_call_chain(augmented)
-    tools_schema = build_tools_schema()
+    messages.append(build_lab_context_message(session))
 
-    msg = call_llm(augmented, tools=tools_schema)
+    # Ensure valid tool call chains in the call-time copy only
+    messages = _ensure_tool_calls_answered(messages)
+
+    msg = call_llm(messages, tools=build_tools_schema())
 
     entry: dict = {"role": "assistant", "content": msg.content or ""}
     if msg.tool_calls:
@@ -535,10 +507,7 @@ def llm_plan(session) -> dict:
             {
                 "id":   tc.id,
                 "type": "function",
-                "function": {
-                    "name":      tc.function.name,
-                    "arguments": tc.function.arguments,
-                },
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
             }
             for tc in msg.tool_calls
         ]

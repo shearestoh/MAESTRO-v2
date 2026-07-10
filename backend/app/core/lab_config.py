@@ -199,11 +199,15 @@ def load_library_documents_into_store() -> None:
             print(f"[WARN] Library document not found on disk: {entry.filename}")
             continue
         try:
-            doc = create_document(entry.filename, file_path.read_bytes())
-            # Remap to the stable library document_id
-            DOCUMENTS.pop(doc.document_id, None)
-            doc.document_id = entry.document_id
-            DOCUMENTS[entry.document_id] = doc
+            doc = create_document(
+                entry.filename,
+                file_path.read_bytes(),
+                document_id=entry.document_id,
+            )
+            if doc.document_id != entry.document_id:
+                DOCUMENTS.pop(doc.document_id, None)
+                doc.document_id = entry.document_id
+                DOCUMENTS[entry.document_id] = doc
             loaded += 1
         except Exception as e:
             print(f"[WARN] Could not reload library document {entry.filename}: {e}")

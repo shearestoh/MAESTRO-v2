@@ -2,7 +2,7 @@ import { useState }        from "react";
 import { useMaestroStore } from "@/store/maestroStore";
 import { cn }              from "@/lib/utils";
 import { ChevronDown, ChevronRight, AlertTriangle } from "lucide-react";
-import type { Sample, ResultEntry, OutstandingTask } from "@/types";
+import type { Sample, ResultEntry, OutstandingTask, WorkflowStep } from "@/types";
 import { getBestOutput } from "@/types";
 
 type Tab = "synthesis" | "characterisation" | "computation";
@@ -70,7 +70,8 @@ export function LabNotebook() {
         {tab === "computation" && (
           <ComputationTab
             results={results}
-            nCallsTarget={state?.optimiser_config?.n_calls ?? 20}
+            backgroundPlan={state?.background_job_plan ?? []}
+            defaultNCalls={state?.optimiser_config?.n_calls ?? 20}
           />
         )}
       </div>
@@ -303,10 +304,11 @@ function CharacterisationTab({
 }
 
 function ComputationTab({
-  results, nCallsTarget,
+  results, backgroundPlan, defaultNCalls,
 }: {
-  results:       ResultEntry[];
-  nCallsTarget:  number;
+  results:        ResultEntry[];
+  backgroundPlan: WorkflowStep[];
+  defaultNCalls:  number;
 }) {
   if (results.length === 0) {
     return (
@@ -379,8 +381,15 @@ function ComputationTab({
         const conditionValue = r.condition_value ?? 0;
         const optimiserName  = r.optimiser_name  || "";
         const bestObj        = r.best_objective  ?? null;
-        const nEvals         = r.X.length;
-        const progressPct    = Math.min(100, (nEvals / nCallsTarget) * 100);
+        const nEvals       = r.X.length;
+        const matchingStep = backgroundPlan.find(
+          (s) =>
+            s.condition_label === r.condition_label &&
+            Math.abs((s.condition_value ?? 0) - r.condition_value) < 1e-9 &&
+            (s.optimiser_name ?? "") === r.optimiser_name
+        );
+        const nCallsTarget = matchingStep?.n_calls ?? defaultNCalls;
+        const progressPct  = Math.min(100, (nEvals / nCallsTarget) * 100);
 
         return (
           <div key={idx} className="glass-panel p-4 space-y-3">

@@ -132,9 +132,17 @@ export function Campaign() {
                     const condValue   = r.condition_value ?? 0;
                     const bestObj     = r.best_objective ?? null;
                     const objMetric   = campaign.objective_metric ?? "objective";
-                    const nEvals      = r.X.length;
-                    const nCallsTarget = state?.optimiser_config?.n_calls ?? 20;
-                    const progressPct = Math.min(100, (nEvals / nCallsTarget) * 100);
+                    const nEvals = r.X.length;
+                    // Use the step's own n_calls if available in the background plan,
+                    // otherwise fall back to the session optimiser config default.
+                    const matchingStep = (state?.background_job_plan ?? []).find(
+                      (s) =>
+                        s.condition_label === r.condition_label &&
+                        Math.abs((s.condition_value ?? 0) - r.condition_value) < 1e-9 &&
+                        (s.optimiser_name ?? "") === r.optimiser_name
+                    );
+                    const nCallsTarget = matchingStep?.n_calls ?? state?.optimiser_config?.n_calls ?? 20;
+                    const progressPct  = Math.min(100, (nEvals / nCallsTarget) * 100);
 
                     return (
                       <div key={idx} className="glass-panel p-3 space-y-2">

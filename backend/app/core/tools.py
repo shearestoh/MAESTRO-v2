@@ -686,7 +686,7 @@ def run_optimise_condition(
     session.live_event_queue.append(ExecutionEvent(
         event_type="optimiser_start",
         message=(
-            f"Starting BO ({optimiser_name}): {condition_label}={condition_value} | "
+            f"Starting {optimiser_name}: {condition_label}={condition_value} | "
             f"Optimising: {param_summary} | Objective: {objective_metric}"
         ),
         equipment="optimiser",
@@ -723,7 +723,7 @@ def run_optimise_condition(
         param_str = ", ".join(f"{k}={v:.3f}" for k, v in param_dict.items())
         session.live_event_queue.append(ExecutionEvent(
             event_type="candidate_proposed",
-            message=f"BO proposes: {param_str}",
+            message=f"{optimiser_name} proposes: {param_str}",
             equipment="optimiser",
             category="planning",
             payload={"params": param_dict},
@@ -848,7 +848,7 @@ def run_optimise_condition(
     session.live_event_queue.append(ExecutionEvent(
         event_type="optimiser_complete",
         message=(
-            f"BO complete ({optimiser_name}): {condition_label}={condition_value}. "
+            f"{optimiser_name} complete: {condition_label}={condition_value}. "
             f"Best {objective_metric}: {best_str}"
         ),
         equipment="optimiser",

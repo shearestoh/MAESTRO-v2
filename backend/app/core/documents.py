@@ -16,6 +16,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+import json as _json_module
 
 from app.core.models import DocumentModel, FigureModel, SectionModel, TableModel
 
@@ -23,6 +24,64 @@ DOCUMENTS: Dict[str, DocumentModel] = {}
 
 _MEDIA_DIR = os.path.join(tempfile.gettempdir(), "maestro_media")
 os.makedirs(_MEDIA_DIR, exist_ok=True)
+
+def _cache_path(document_id: str) -> str:
+    """Return the path where parsed document content is cached as JSON."""
+    cache_dir = os.path.join(os.path.dirname(_MEDIA_DIR), "doc_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, f"{document_id}.json")
+
+
+def _save_doc_cache(doc: DocumentModel) -> None:
+    """Persist a parsed DocumentModel to JSON cache (excludes raw_text to save space)."""
+    try:
+        cache = {
+            "document_id": doc.document_id,
+            "filename":    doc.filename,
+            "title":       doc.title,
+            "uploaded_at": doc.uploaded_at,
+            "summary":     doc.summary,
+            "authors":     doc.authors,
+            "year":        doc.year,
+            "doi":         doc.doi,
+            "journal":     doc.journal,
+            "pages":       doc.pages,
+            "sections":    [s.model_dump() for s in doc.sections],
+            "figures":     [f.model_dump() for f in doc.figures],
+            "tables":      [t.model_dump() for t in doc.tables],
+        }
+        with open(_cache_path(doc.document_id), "w", encoding="utf-8") as f:
+            _json_module.dump(cache, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[WARN] Could not cache document {doc.document_id}: {e}")
+
+
+def _load_doc_cache(document_id: str, filename: str) -> DocumentModel | None:
+    """Load a previously cached DocumentModel. Returns None if cache miss or stale."""
+    path = _cache_path(document_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = _json_module.load(f)
+        return DocumentModel(
+            document_id=data["document_id"],
+            filename=data.get("filename", filename),
+            title=data.get("title"),
+            uploaded_at=data.get("uploaded_at"),
+            summary=data.get("summary"),
+            authors=data.get("authors", []),
+            year=data.get("year"),
+            doi=data.get("doi"),
+            journal=data.get("journal"),
+            pages=data.get("pages", []),
+            sections=[SectionModel(**s) for s in data.get("sections", [])],
+            figures=[FigureModel(**f) for f in data.get("figures", [])],
+            tables=[TableModel(**t) for t in data.get("tables", [])],
+        )
+    except Exception as e:
+        print(f"[WARN] Could not load document cache for {document_id}: {e}")
+        return None
 
 
 def _extract_paper_metadata(markdown: str) -> dict:
@@ -339,7 +398,18 @@ def _find_section_for_caption(caption: str, sections: List[SectionModel]) -> str
     return sections[-1].heading if sections else ""
 
 
-def create_document(filename: str, file_bytes: bytes) -> DocumentModel:
+def create_document(filename: str, file_bytes: bytes, document_id: str | None = None) -> DocumentModel:
+    """
+    Parse a PDF with MinerU and return a DocumentModel.
+    If document_id is provided and a cache exists, returns the cached version
+    without re-running MinerU.
+    """
+    if document_id:
+        cached = _load_doc_cache(document_id, filename)
+        if cached:
+            DOCUMENTS[document_id] = cached
+            return cached
+
     try:
         markdown, sections, figures, tables = _extract_with_mineru(file_bytes)
     except Exception as e:
@@ -348,7 +418,7 @@ def create_document(filename: str, file_bytes: bytes) -> DocumentModel:
             "Ensure MinerU is installed: pip install mineru"
         )
 
-    # Extract paper title
+    # Extract title
     title = filename
     for s in sections:
         if s.level == 1 and len(s.heading) > 5:
@@ -358,11 +428,10 @@ def create_document(filename: str, file_bytes: bytes) -> DocumentModel:
         lines = [l.strip() for l in markdown.splitlines() if l.strip()]
         title = next((l[:300] for l in lines[:15] if len(l) > 20), filename)
 
-    # Extract paper metadata (authors, year, DOI, journal)
     metadata = _extract_paper_metadata(markdown)
 
     doc = DocumentModel(
-        document_id=str(uuid.uuid4()),
+        document_id=document_id or str(uuid.uuid4()),
         filename=filename,
         title=title,
         raw_text=markdown,
@@ -377,6 +446,7 @@ def create_document(filename: str, file_bytes: bytes) -> DocumentModel:
         journal=metadata.get("journal"),
     )
     DOCUMENTS[doc.document_id] = doc
+    _save_doc_cache(doc)
     return doc
 
 

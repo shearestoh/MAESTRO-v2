@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid as _uuid
 from datetime import datetime
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -207,7 +208,10 @@ async def upload_document(
         await asyncio.sleep(0.05)
 
         loop = asyncio.get_event_loop()
-        doc  = await loop.run_in_executor(None, create_document, file.filename, file_bytes)
+        new_doc_id = str(_uuid.uuid4())
+        doc = await loop.run_in_executor(
+            None, create_document, file.filename, file_bytes, new_doc_id
+        )
 
         add_document_to_library(
             document_id=doc.document_id,

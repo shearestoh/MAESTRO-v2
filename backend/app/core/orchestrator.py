@@ -1,8 +1,11 @@
 """
 Session management and workflow execution for MAESTRO.
 
-Instrument actions require user approval via a workflow plan before execution.
-Non-instrument actions execute immediately.
+Tool message chain integrity:
+  - session.agent_state.messages is the persistent history.
+  - Tool responses are appended here only when they correspond to a real tool call.
+  - _ensure_tool_calls_answered in llm.py handles the call-time copy for API validity.
+  - This file never calls _repair_tool_call_chain or _inject_missing_tool_responses.
 """
 from __future__ import annotations
 
@@ -49,7 +52,7 @@ def _welcome_message() -> dict:
             "Welcome to **MAESTRO** — your agentic scientific orchestrator.\n\n"
             "You can:\n"
             "- Design and run experimental campaigns\n"
-            "- Upload papers to the Library for reference and reproduction\n"
+            "- Upload papers and manuals to the Library for reference and reproduction\n"
             "- Query and analyse your experimental results\n"
             "- Configure your lab via Lab Setup\n\n"
             "What would you like to explore today?"
@@ -61,7 +64,7 @@ def create_session() -> SessionModel:
     ensure_db()
     session_id  = str(uuid.uuid4())
     agent_state = AgentStateModel(messages=[_welcome_message()])
-    session = SessionModel(
+    session     = SessionModel(
         session_id=session_id,
         agent_state=agent_state,
         current_mission="Awaiting instruction.",
@@ -87,11 +90,37 @@ def _plan_requires_approval(plan: list) -> bool:
     return any(step.get("kind") in _INSTRUMENT_STEP_KINDS for step in plan)
 
 
+def _append_tool_response(session: SessionModel, tool_call_id: str, name: str, content: str) -> None:
+    """
+    Append a tool response to the persistent message history.
+    Only appends if there is a preceding assistant message with a matching tool_call_id.
+    Prevents orphaned tool messages that cause API errors.
+    """
+    messages = session.agent_state.messages
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            ids = {tc.get("id") for tc in msg["tool_calls"]}
+            if tool_call_id in ids:
+                messages.append({
+                    "role":         "tool",
+                    "tool_call_id": tool_call_id,
+                    "name":         name,
+                    "content":      content,
+                })
+                return
+        # Don't search past a tool message block
+        if msg.get("role") == "user":
+            break
+    # If no matching tool_call found, log and skip — do not append
+    print(f"[WARN] Skipping orphaned tool response for tool_call_id={tool_call_id}, name={name}")
+
+
 def post_user_message(session_id: str, text: str) -> SessionModel:
     session = get_session(session_id)
     lock    = _lock_for(session_id)
 
     with lock:
+        # Clear any stale pending state from a previous turn
         if session.pending_plan is not None:
             session.pending_plan = None
             session.agent_state.awaiting_confirmation = False
@@ -135,11 +164,10 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
     return session
 
 
-def _check_plan_feasibility(session, steps: list) -> str | None:
+def _check_plan_feasibility(session: SessionModel, steps: list) -> str | None:
     """
-    Check whether the proposed workflow steps are feasible given registered instruments.
-    Returns a warning message string if infeasible, None if feasible.
-    Called automatically before presenting any workflow plan to the user.
+    Check whether proposed workflow steps are feasible given registered instruments.
+    Returns a warning string if infeasible, None if feasible or no instrument steps.
     """
     from app.core.tool_registry import TOOL_REGISTRY
 
@@ -148,31 +176,25 @@ def _check_plan_feasibility(session, steps: list) -> str | None:
         if s.get("kind") in ("synthesise", "characterise", "optimise_condition")
     ]
     if not instrument_steps:
-        return None  # No instrument steps — nothing to check
+        return None
 
-    required_params  = set()
-    required_outputs = set()
+    required_params:  set[str] = set()
+    required_outputs: set[str] = set()
 
     for step in instrument_steps:
         kind = step.get("kind")
         if kind == "synthesise":
-            for k in (step.get("params") or {}).keys():
-                required_params.add(k)
+            required_params.update(k for k in (step.get("params") or {}) if k)
         elif kind == "characterise":
-            measures = step.get("measures")
-            if measures:
-                required_outputs.add(measures)
-            for k in (step.get("conditions") or {}).keys():
-                required_params.add(k)
+            if step.get("measures"):
+                required_outputs.add(step["measures"])
+            required_params.update(k for k in (step.get("conditions") or {}) if k)
         elif kind == "optimise_condition":
-            for fp in (step.get("free_params") or []):
-                required_params.add(fp.get("name", ""))
-            objective = step.get("objective_metric")
-            if objective:
-                required_outputs.add(objective)
-
-    required_params  = {p for p in required_params  if p}
-    required_outputs = {o for o in required_outputs if o}
+            required_params.update(
+                fp.get("name", "") for fp in (step.get("free_params") or []) if fp.get("name")
+            )
+            if step.get("objective_metric"):
+                required_outputs.add(step["objective_metric"])
 
     if not required_params and not required_outputs:
         return None
@@ -180,28 +202,23 @@ def _check_plan_feasibility(session, steps: list) -> str | None:
     feasibility = TOOL_REGISTRY.check_feasibility(
         list(required_params), list(required_outputs)
     )
-
     if feasibility["feasible"]:
         return None
 
     missing_p = feasibility.get("missing_params", [])
     missing_o = feasibility.get("missing_outputs", [])
-    parts = []
+    parts     = []
     if missing_p:
-        parts.append(f"parameters not controllable by any instrument: **{', '.join(missing_p)}**")
+        parts.append(f"parameters not controllable: **{', '.join(missing_p)}**")
     if missing_o:
-        parts.append(f"objectives not measurable by any instrument: **{', '.join(missing_o)}**")
+        parts.append(f"objectives not measurable: **{', '.join(missing_o)}**")
 
-    available_p = feasibility.get("available_params", [])
-    available_o = feasibility.get("available_outputs", [])
-
-    warning = (
-        f"⚠️ **Feasibility check failed.** This workflow requires {' and '.join(parts)}.\n\n"
-        f"Registered instruments can control: {available_p or 'none'}\n"
-        f"Registered instruments can measure: {available_o or 'none'}\n\n"
+    return (
+        f"⚠️ **Capability check failed.** This workflow requires {' and '.join(parts)}.\n\n"
+        f"Available parameters: {feasibility.get('available_params') or 'none'}\n"
+        f"Available outputs: {feasibility.get('available_outputs') or 'none'}\n\n"
         f"Please register the appropriate instruments in Lab Setup, or adjust the workflow."
     )
-    return warning
 
 
 def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_names):
@@ -220,12 +237,10 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
                 continue
             args      = _safe_parse_args(tc)
             case_name = args.get("case_name", "Case Study")
-            session.agent_state.messages.append({
-                "role":         "tool",
-                "tool_call_id": tc["id"],
-                "name":         tc["function"]["name"],
-                "content":      json.dumps({"status": "running", "case_name": case_name}),
-            })
+            _append_tool_response(
+                session, tc["id"], tc["function"]["name"],
+                json.dumps({"status": "running", "case_name": case_name}),
+            )
             try:
                 execute_plan_step(
                     session,
@@ -266,9 +281,15 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
                 "role": "assistant",
                 "content": "I couldn't build a valid workflow plan. Please try describing the steps again.",
             })
+            for tc in pending_calls:
+                if tc["function"]["name"] == "plan_workflow":
+                    _append_tool_response(
+                        session, tc["id"], "plan_workflow",
+                        json.dumps({"status": "error", "message": "No valid steps parsed."}),
+                    )
             return
 
-        # ── Capability check — runs for ALL proposed workflows ────────────────
+        # Capability check on all proposed workflows
         feasibility_warning = _check_plan_feasibility(
             session, [s.model_dump() for s in all_steps]
         )
@@ -278,15 +299,10 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
             })
             for tc in pending_calls:
                 if tc["function"]["name"] == "plan_workflow":
-                    session.agent_state.messages.append({
-                        "role":         "tool",
-                        "tool_call_id": tc["id"],
-                        "name":         "plan_workflow",
-                        "content":      json.dumps({
-                            "status":  "rejected",
-                            "message": "Workflow rejected — instrument capability check failed.",
-                        }),
-                    })
+                    _append_tool_response(
+                        session, tc["id"], "plan_workflow",
+                        json.dumps({"status": "rejected", "message": "Capability check failed."}),
+                    )
             return
 
         combined_summary = (
@@ -298,20 +314,20 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
             steps=all_steps,
             source="agent",
         )
-        plan_steps = [step.model_dump() for step in session.pending_plan.steps]
-        session.projected_schedule = compute_projected_schedule(plan=plan_steps)
+        session.projected_schedule = compute_projected_schedule(
+            plan=[s.model_dump() for s in all_steps]
+        )
 
         for tc in pending_calls:
             if tc["function"]["name"] == "plan_workflow":
-                session.agent_state.messages.append({
-                    "role":         "tool",
-                    "tool_call_id": tc["id"],
-                    "name":         "plan_workflow",
-                    "content":      json.dumps({
+                _append_tool_response(
+                    session, tc["id"], "plan_workflow",
+                    json.dumps({
                         "status":  "pending_approval",
                         "message": "Workflow plan presented to user for approval.",
                     }),
-                })
+                )
+
 
 def _execute_non_instrument_actions(session, lock, plan, pending_calls):
     with lock:
@@ -346,19 +362,16 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
         except Exception as e:
             result = {"status": "error", "message": str(e)}
 
-        session.agent_state.messages.append({
-            "role":         "tool",
-            "tool_call_id": tc["id"],
-            "name":         name,
-            "content":      json.dumps(result, default=str),
-        })
+        _append_tool_response(
+            session, tc["id"], name,
+            json.dumps(result, default=str),
+        )
         tool_results.append((name, result))
 
     needs_followup = any(
         name in ("query_database", "list_samples")
         for name, _ in tool_results
     )
-
     if needs_followup:
         with lock:
             session.equipment_status.llm = True
@@ -367,6 +380,13 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
         with lock:
             session.equipment_status.llm = False
             session.current_activity     = None
+            
+        if session.agent_state.awaiting_confirmation:
+            followup_calls = list(session.agent_state.pending_tool_calls)
+            followup_names = [tc["function"]["name"] for tc in followup_calls]
+            followup_plan  = build_execution_plan_from_tool_calls(session, followup_calls)
+            if not _plan_requires_approval(followup_plan):
+                _execute_non_instrument_actions(session, lock, followup_plan, followup_calls)
 
 
 def _sync_condition_key(session: SessionModel) -> None:
@@ -514,7 +534,6 @@ def execute_plan(session_id: str, plan_dict: dict) -> SessionModel:
         session.bo_iteration_counts        = {}
         session.agent_state.awaiting_confirmation = False
         session.agent_state.pending_tool_calls    = []
-        _inject_missing_tool_responses(session)
 
     threading.Thread(
         target=_run_background_job,
@@ -535,8 +554,12 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
         return session
 
     if proceed:
-        pending_calls = session.agent_state.pending_tool_calls
-        plan          = build_execution_plan_from_tool_calls(session, pending_calls)
+        if session.pending_plan:
+            plan = [step.model_dump() for step in session.pending_plan.steps]
+        else:
+            plan = build_execution_plan_from_tool_calls(
+                session, session.agent_state.pending_tool_calls
+            )
 
         if not plan:
             with lock:
@@ -569,12 +592,10 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
     else:
         with lock:
             for tc in session.agent_state.pending_tool_calls:
-                session.agent_state.messages.append({
-                    "role":         "tool",
-                    "tool_call_id": tc["id"],
-                    "name":         tc["function"]["name"],
-                    "content":      json.dumps({"status": "abort", "message": "User aborted."}),
-                })
+                _append_tool_response(
+                    session, tc["id"], tc["function"]["name"],
+                    json.dumps({"status": "aborted", "message": "User aborted the workflow."}),
+                )
             session.agent_state.messages.append({"role": "user", "content": "abort"})
             session.agent_state.awaiting_confirmation = False
             session.agent_state.pending_tool_calls    = []
@@ -589,35 +610,6 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
     return session
 
 
-def _inject_missing_tool_responses(session: SessionModel) -> None:
-    messages      = session.agent_state.messages
-    responded_ids = {
-        msg["tool_call_id"]
-        for msg in messages
-        if msg.get("role") == "tool" and msg.get("tool_call_id")
-    }
-    injections = []
-    for i, msg in enumerate(messages):
-        if msg.get("role") != "assistant":
-            continue
-        for tc in msg.get("tool_calls", []):
-            tc_id   = tc.get("id")
-            tc_name = tc.get("function", {}).get("name", "unknown_tool")
-            if tc_id and tc_id not in responded_ids:
-                injections.append((i + 1, {
-                    "role":         "tool",
-                    "tool_call_id": tc_id,
-                    "name":         tc_name,
-                    "content":      json.dumps({
-                        "status":  "completed",
-                        "message": f"Tool '{tc_name}' executed.",
-                    }),
-                }))
-                responded_ids.add(tc_id)
-    for insert_idx, tool_msg in reversed(injections):
-        messages.insert(insert_idx, tool_msg)
-
-
 def _consume_one_live_event(session: SessionModel) -> None:
     if not session.live_event_queue:
         return
@@ -626,15 +618,13 @@ def _consume_one_live_event(session: SessionModel) -> None:
     session.background_job_label = event.message
     session.activity_log.append(f"[{event.category.upper()}] {event.message}")
     session.activity_log = session.activity_log[-50:]
-
     session.equipment_status = EquipmentStatusModel()
     eq_map = {
         "llm": "llm", "optimiser": "optimiser", "synthesiser": "synthesiser",
         "characteriser": "characteriser", "memory": "memory",
         "knowledge": "knowledge", "reporting": "reporting",
     }
-    eq_key = eq_map.get(event.equipment or "")
-    if eq_key:
+    if eq_key := eq_map.get(event.equipment or ""):
         setattr(session.equipment_status, eq_key, True)
 
 
@@ -673,7 +663,6 @@ def _run_background_job(session_id: str) -> None:
             session.current_activity       = None
             session.equipment_status       = EquipmentStatusModel()
             session.pending_plan           = None
-            _inject_missing_tool_responses(session)
 
             if not success:
                 session.background_job_error = error_msg
@@ -758,11 +747,10 @@ def _run_background_job(session_id: str) -> None:
                 set_step_status(step_id, "failed")
 
         with lock:
-            completed = sum(
+            session.background_job_index = sum(
                 1 for s in session.background_job_plan
                 if session.step_statuses.get(s.get("step_id", "")) == "completed"
             )
-            session.background_job_index = completed
 
     try:
         stop_drain = threading.Event()
@@ -782,9 +770,7 @@ def _run_background_job(session_id: str) -> None:
 
         step_threads = [
             threading.Thread(
-                target=execute_step_thread,
-                args=(step,),
-                daemon=True,
+                target=execute_step_thread, args=(step,), daemon=True,
                 name=f"maestro-step-{step.get('step_id', 'x')[:6]}",
             )
             for step in session.background_job_plan
@@ -816,13 +802,10 @@ def register_artifact(session: SessionModel, name: str, kind: str, path: str) ->
 
 def session_state_payload(session: SessionModel) -> dict:
     results   = session.agent_state.results_store
-    obj_label = cond_label = "Objective"
+    obj_label = "Objective"
 
     if session.extracted_campaign:
         obj_label = session.extracted_campaign.objective_metric or "Objective"
-        ocs = session.extracted_campaign.operating_conditions
-        if ocs:
-            cond_label = ocs[0].get("name", "Conditions")
 
     return {
         "session_id":                 session.session_id,
