@@ -1266,7 +1266,6 @@ function ProtocolsSection() {
         workflow_plan:     workflowPlan as Record<string, unknown> | null,
         results_summary:   resultsSummary,
         optimiser_used:    optimiserUsed,
-        tags:              [],
       });
       setProtocols((prev) => [...prev, result.protocol]);
       setShowSave(false);

@@ -1,33 +1,36 @@
 import { create } from "zustand";
-import type { SessionState, WsEvent, WorkflowPlan, LabSettings, OptimisationLibraryEntry } from "@/types";
+import type {
+  SessionState, WsEvent, WorkflowPlan,
+  LabSettings, OptimisationLibraryEntry,
+} from "@/types";
 import { api } from "@/lib/api";
 
 interface MaestroStore {
-  sessionId:   string | null;
-  state:       SessionState | null;
-  isLoading:   boolean;
-  error:       string | null;
-  wsConnected: boolean;
-  liveEvents:  WsEvent[];
-  lastEvent:   WsEvent | null;
-  sidebarOpen: boolean;
-  labSettings: LabSettings | null;
+  sessionId:           string | null;
+  state:               SessionState | null;
+  isLoading:           boolean;
+  error:               string | null;
+  wsConnected:         boolean;
+  liveEvents:          WsEvent[];
+  lastEvent:           WsEvent | null;
+  sidebarOpen:         boolean;
+  labSettings:         LabSettings | null;
   optimisationLibrary: OptimisationLibraryEntry[];
 
-  initSession:              () => Promise<void>;
-  refreshState:             () => Promise<void>;
-  sendMessage:              (text: string) => Promise<void>;
-  confirm:                  (proceed: boolean) => Promise<void>;
-  executePlan:              (plan: WorkflowPlan) => Promise<void>;
-  reset:                    () => Promise<void>;
-  pushWsEvent:              (event: WsEvent) => void;
-  setWsConnected:           (v: boolean) => void;
-  setSidebarOpen:           (v: boolean) => void;
-  clearError:               () => void;
-  loadLabSettings:          () => Promise<void>;
-  saveLabSettings:          (updates: Partial<LabSettings>) => Promise<void>;
-  loadOptimisationLibrary:  () => Promise<void>;
-  updateOptimiser:          (name: string, nCalls: number, nInitPts: number) => Promise<void>;
+  initSession:             () => Promise<void>;
+  refreshState:            () => Promise<void>;
+  sendMessage:             (text: string) => Promise<void>;
+  confirm:                 (proceed: boolean) => Promise<void>;
+  executePlan:             (plan: WorkflowPlan) => Promise<void>;
+  reset:                   () => Promise<void>;
+  pushWsEvent:             (event: WsEvent) => void;
+  setWsConnected:          (v: boolean) => void;
+  setSidebarOpen:          (v: boolean) => void;
+  clearError:              () => void;
+  loadLabSettings:         () => Promise<void>;
+  saveLabSettings:         (updates: Partial<LabSettings>) => Promise<void>;
+  loadOptimisationLibrary: () => Promise<void>;
+  updateOptimiser:         (name: string, nCalls: number, nInitPts: number) => Promise<void>;
 }
 
 export const useMaestroStore = create<MaestroStore>((set, get) => ({
@@ -47,6 +50,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     try {
       const stored    = localStorage.getItem("maestro_session_id");
       let   sessionId = stored;
+
       if (sessionId) {
         try {
           const res = await api.getState(sessionId);
@@ -57,6 +61,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
           sessionId = null;
         }
       }
+
       const created  = await api.createSession();
       sessionId      = created.session_id;
       localStorage.setItem("maestro_session_id", sessionId);
@@ -71,15 +76,13 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     const { sessionId } = get();
     if (!sessionId) return;
     try {
-      const res = await api.getState(sessionId);
-      const jobDone = (
+      const res    = await api.getState(sessionId);
+      const isDone = !res.state.background_job_active ||
         res.state.background_job_status === "completed" ||
-        res.state.background_job_status === "failed"    ||
-        !res.state.background_job_active
-      );
+        res.state.background_job_status === "failed";
       set((s) => ({
         state:     res.state,
-        isLoading: jobDone ? false : s.isLoading,
+        isLoading: isDone ? false : s.isLoading,
       }));
     } catch (e) {
       set({ error: String(e), isLoading: false });
@@ -122,7 +125,16 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     }
   },
 
+  // Properly resets the existing session on the backend, then creates a new one.
   reset: async () => {
+    const { sessionId } = get();
+    if (sessionId) {
+      try {
+        await api.reset(sessionId);
+      } catch {
+        // If the session no longer exists on the backend, continue with local reset.
+      }
+    }
     localStorage.removeItem("maestro_session_id");
     const created  = await api.createSession();
     localStorage.setItem("maestro_session_id", created.session_id);
@@ -133,6 +145,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
       liveEvents: [],
       lastEvent:  null,
       isLoading:  false,
+      error:      null,
     });
   },
 

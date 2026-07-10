@@ -1294,22 +1294,6 @@ def build_execution_plan_from_tool_calls(session, tool_calls: List[dict]) -> Lis
     return plan
 
 
-def _resolve_free_params_from_lookup(param_lookup: Dict[str, dict]) -> List[dict]:
-    free_params = []
-    for name, p in param_lookup.items():
-        p_min = p.get("min")
-        p_max = p.get("max")
-        if p_min is None or p_max is None:
-            continue
-        free_params.append({
-            "name": p.get("name", name),
-            "min":  float(p_min),
-            "max":  float(p_max),
-            "unit": p.get("unit", ""),
-        })
-    return free_params
-
-
 # ── Timeline builder ──────────────────────────────────────────────────────────
 
 def build_dynamic_timeline(session) -> List[dict]:

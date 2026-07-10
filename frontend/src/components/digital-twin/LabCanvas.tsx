@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import {
   ReactFlow, Background, Controls, MiniMap,
   BackgroundVariant, useNodesState, useEdgesState,
@@ -6,42 +6,10 @@ import {
   ReactFlowProvider,
 } from "@xyflow/react";
 import { useMaestroStore } from "@/store/maestroStore";
-import { EquipmentNode } from "./EquipmentNode";
+import { EquipmentNode }   from "./EquipmentNode";
 import type { EquipmentNodeData, EquipmentStatus } from "@/types";
 
 const nodeTypes = { equipment: EquipmentNode };
-
-function makeNodes(eq: EquipmentStatus): Node[] {
-  const defs: Array<{
-    id: string; label: string; type: keyof EquipmentStatus | "llm";
-    x: number; y: number; desc: string; extra?: Partial<EquipmentNodeData>;
-  }> = [
-    { id: "maestro",       label: "MAESTRO",       type: "llm",           x: 300, y: 200, desc: "LLM Orchestrator"      },
-    { id: "knowledge",     label: "Knowledge",     type: "knowledge",     x:  60, y:  50, desc: "RAG + Document Store"  },
-    { id: "optimiser",     label: "Optimiser",     type: "optimiser",     x: 540, y:  50, desc: "Bayesian / LLM-BO"    },
-    { id: "synthesiser",   label: "Synthesiser",   type: "synthesiser",   x:  60, y: 360, desc: "Sample Synthesis",     extra: { failProb: 0.06, timeCostS: 5 } },
-    { id: "characteriser", label: "Characteriser", type: "characteriser", x: 540, y: 360, desc: "Characterisation",     extra: { noiseSigma: 0.5, timeCostS: 8 } },
-    { id: "memory",        label: "Memory",        type: "memory",        x: 300, y: 420, desc: "Experiment Store"      },
-    { id: "reporting",     label: "Reporting",     type: "reporting",     x: 300, y:  10, desc: "Figure Generation"     },
-  ];
-
-  return defs.map(({ id, label, type, x, y, desc, extra }) => {
-    const active = type === "llm" ? eq.llm : eq[type as keyof EquipmentStatus] ?? false;
-    return {
-      id,
-      type: "equipment",
-      position: { x, y },
-      data: {
-        label,
-        equipmentType: type === "llm" ? "llm" : type,
-        active,
-        description: desc,
-        status: active ? "active" : "idle",
-        ...extra,
-      } as EquipmentNodeData,
-    };
-  });
-}
 
 const INITIAL_EDGES: Edge[] = [
   { id: "e-m-k",   source: "maestro",       target: "knowledge"     },
@@ -54,39 +22,82 @@ const INITIAL_EDGES: Edge[] = [
   { id: "e-t-mem", source: "characteriser", target: "memory"        },
 ];
 
+// Node definitions are static — only `active` and `status` change at runtime.
+const NODE_DEFS: Array<{
+  id:    string;
+  label: string;
+  eqKey: keyof EquipmentStatus | "llm";
+  x:     number;
+  y:     number;
+  desc:  string;
+  extra?: Partial<EquipmentNodeData>;
+}> = [
+  { id: "maestro",       label: "MAESTRO",       eqKey: "llm",           x: 300, y: 200, desc: "LLM Orchestrator"     },
+  { id: "knowledge",     label: "Knowledge",     eqKey: "knowledge",     x:  60, y:  50, desc: "RAG + Document Store" },
+  { id: "optimiser",     label: "Optimiser",     eqKey: "optimiser",     x: 540, y:  50, desc: "Bayesian / LLM-BO"   },
+  { id: "synthesiser",   label: "Synthesiser",   eqKey: "synthesiser",   x:  60, y: 360, desc: "Sample Synthesis",    extra: { failProb: 0.06, timeCostS: 5  } },
+  { id: "characteriser", label: "Characteriser", eqKey: "characteriser", x: 540, y: 360, desc: "Characterisation",    extra: { noiseSigma: 0.5, timeCostS: 8 } },
+  { id: "memory",        label: "Memory",        eqKey: "memory",        x: 300, y: 420, desc: "Experiment Store"     },
+  { id: "reporting",     label: "Reporting",     eqKey: "reporting",     x: 300, y:  10, desc: "Figure Generation"    },
+];
+
+function buildNodes(eq: EquipmentStatus): Node[] {
+  return NODE_DEFS.map(({ id, label, eqKey, x, y, desc, extra }) => {
+    const active = eqKey === "llm" ? eq.llm : eq[eqKey as keyof EquipmentStatus];
+    return {
+      id,
+      type: "equipment",
+      position: { x, y },
+      data: {
+        label,
+        equipmentType: eqKey === "llm" ? "llm" : eqKey,
+        active,
+        description: desc,
+        status: active ? "active" : "idle",
+        ...extra,
+      } as EquipmentNodeData,
+    };
+  });
+}
+
+function buildEdges(eq: EquipmentStatus): Edge[] {
+  return INITIAL_EDGES.map((e) => {
+    const nonMaestroId     = e.source === "maestro" ? e.target : e.source;
+    const nonMaestroActive = eq[nonMaestroId as keyof EquipmentStatus] ?? false;
+    const isMaestroEdge    = e.source === "maestro" || e.target === "maestro";
+    const pipelineActive   =
+      (eq[e.source as keyof EquipmentStatus] ?? false) ||
+      (eq[e.target as keyof EquipmentStatus] ?? false);
+    const animated = isMaestroEdge ? nonMaestroActive : pipelineActive;
+    return {
+      ...e,
+      animated,
+      style: { stroke: animated ? "#3b82f6" : "#334155", strokeWidth: animated ? 2 : 1 },
+    };
+  });
+}
+
 function LabCanvasInner() {
-  const state = useMaestroStore((s) => s.state);
-  const eq: EquipmentStatus = state?.equipment_status ?? {
+  const eq: EquipmentStatus = useMaestroStore((s) => s.state?.equipment_status ?? {
     llm: false, optimiser: false, synthesiser: false,
     characteriser: false, memory: false, knowledge: false, reporting: false,
-  };
+  });
 
-  const [nodes, setNodes, onNodesChange] = useNodesState(makeNodes(eq));
-  const [edges, setEdges, onEdgesChange] = useEdgesState(INITIAL_EDGES);
+  const initialNodes = useMemo(() => buildNodes(eq), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(buildEdges(eq));
+
+  // Derive a stable change key — only update when an equipment flag actually changes
+  const eqKey = Object.values(eq).map(Number).join("");
 
   useEffect(() => {
-    setNodes(makeNodes(eq));
-    setEdges((eds) =>
-      eds.map((e) => {
-        const nonMaestroId     = e.source === "maestro" ? e.target : e.source;
-        const nonMaestroActive = eq[nonMaestroId as keyof EquipmentStatus] ?? false;
-        const isMaestroEdge    = e.source === "maestro" || e.target === "maestro";
-        const pipelineActive   =
-          (eq[e.source as keyof EquipmentStatus] ?? false) ||
-          (eq[e.target as keyof EquipmentStatus] ?? false);
-        const animated = isMaestroEdge ? nonMaestroActive : pipelineActive;
-        return {
-          ...e,
-          animated,
-          style: { stroke: animated ? "#3b82f6" : "#334155", strokeWidth: animated ? 2 : 1 },
-        };
-      })
-    );
-  }, [eq.llm, eq.optimiser, eq.synthesiser, eq.characteriser, eq.memory, eq.knowledge, eq.reporting]);
+    setNodes(buildNodes(eq));
+    setEdges(buildEdges(eq));
+  }, [eqKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onConnect = useCallback(
     (params: Connection) => setEdges((eds) => addEdge(params, eds)),
-    [setEdges]
+    [setEdges],
   );
 
   return (

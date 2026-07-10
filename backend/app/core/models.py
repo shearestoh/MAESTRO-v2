@@ -1,7 +1,9 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field, ConfigDict
+
 import uuid
+from typing import Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── Document structure ────────────────────────────────────────────────────────
@@ -16,11 +18,11 @@ class FigureModel(BaseModel):
 
 
 class TableModel(BaseModel):
-    table_id:  str
-    page_idx:  int = 0
-    caption:   str = ""
-    html:      str = ""
-    section:   str = ""
+    table_id: str
+    page_idx: int = 0
+    caption:  str = ""
+    html:     str = ""
+    section:  str = ""
 
 
 class SectionModel(BaseModel):
@@ -42,7 +44,6 @@ class DocumentModel(BaseModel):
     sections:    List[SectionModel] = Field(default_factory=list)
     figures:     List[FigureModel]  = Field(default_factory=list)
     tables:      List[TableModel]   = Field(default_factory=list)
-    # Extracted paper metadata
     authors:     List[str]          = Field(default_factory=list)
     year:        Optional[int]      = None
     doi:         Optional[str]      = None
@@ -77,16 +78,49 @@ class OptimisationLibraryEntry(BaseModel):
     is_default:   bool = False
 
 
+# ── Resource Inventory ────────────────────────────────────────────────────────
+
+class ResourceConsumptionRule(BaseModel):
+    instrument_name: str
+    amount_per_use:  float
+    description:     str = ""
+
+
+class LabResource(BaseModel):
+    resource_id:       str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name:              str
+    unit:              str
+    current_stock:     float = 0.0
+    min_stock:         float = 0.0
+    description:       str = ""
+    consumption_rules: List[ResourceConsumptionRule] = Field(default_factory=list)
+
+
+# ── Protocols ─────────────────────────────────────────────────────────────────
+
+class ProtocolEntry(BaseModel):
+    protocol_id:       str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name:              str
+    description:       str = ""
+    created_at:        str = ""
+    optimiser_used:    str = ""
+    results_summary:   str = ""
+    user_instructions: List[str] = Field(default_factory=list)
+    notes:             str = ""
+    workflow_plan:     Optional[Dict[str, Any]] = None
+
+
 # ── Lab Settings ──────────────────────────────────────────────────────────────
+# NOTE: LabResource and ProtocolEntry must be defined before LabSettings.
 
 class LabSettings(BaseModel):
-    lab_name:                str   = "My Lab"
-    lab_description:         str   = ""
-    system_prompt_extension: str   = ""
-    document_library:         List[DocumentLibraryEntry]     = Field(default_factory=list)
-    optimisation_library:     List[OptimisationLibraryEntry] = Field(default_factory=list)
-    resource_inventory:       List[LabResource]              = Field(default_factory=list)
-    protocols:                List[ProtocolEntry]            = Field(default_factory=list) 
+    lab_name:                str = "My Lab"
+    lab_description:         str = ""
+    system_prompt_extension: str = ""
+    document_library:        List[DocumentLibraryEntry]     = Field(default_factory=list)
+    optimisation_library:    List[OptimisationLibraryEntry] = Field(default_factory=list)
+    resource_inventory:      List[LabResource]              = Field(default_factory=list)
+    protocols:               List[ProtocolEntry]            = Field(default_factory=list)
 
 
 # ── Optimiser Config ──────────────────────────────────────────────────────────
@@ -133,45 +167,43 @@ class Sample(BaseModel):
 
 
 def generate_sample_id(session: "SessionModel") -> str:
-    count = len(session.sample_registry) + 1
-    return f"S-{count:03d}"
+    return f"S-{len(session.sample_registry) + 1:03d}"
 
 
 # ── Workflow Plan ─────────────────────────────────────────────────────────────
 
 class WorkflowStep(BaseModel):
-    # Accept and ignore extra fields from the frontend editor
     model_config = ConfigDict(extra="ignore")
 
-    step_id:       str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
-    kind:          str
-    label:         str
-    instrument:    Optional[str] = None
-    instrument_id: Optional[str] = None
-    dependencies:  List[str] = Field(default_factory=list)
-    status:        str = "pending"
-    start_time:    Optional[str] = None
-    end_time:      Optional[str] = None
+    step_id:              str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    kind:                 str
+    label:                str
+    instrument:           Optional[str] = None
+    instrument_id:        Optional[str] = None
+    dependencies:         List[str] = Field(default_factory=list)
+    status:               str = "pending"
+    start_time:           Optional[str] = None
+    end_time:             Optional[str] = None
     projected_start_time: Optional[str] = None
     projected_end_time:   Optional[str] = None
-    params:          Dict[str, float] = Field(default_factory=dict)
-    produces:        Optional[str] = None
-    sample_ref:      Optional[str] = None
-    conditions:      Dict[str, float] = Field(default_factory=dict)
-    measures:        Optional[str] = None
-    condition_label: Optional[str] = None
-    condition_value: Optional[float] = None
-    condition_unit:  str = ""
-    free_params:     List[dict] = Field(default_factory=list)
-    objective_metric:Optional[str] = None
-    optimiser_name:  Optional[str] = None 
-    n_calls:         int = 20
-    n_initial_points:int = 6
-    plot_code:       Optional[str] = None
-    analysis_code:   Optional[str] = None
-    sql:             Optional[str] = None
-    description:     Optional[str] = None
-    editable_fields: List[str] = Field(default_factory=list)
+    params:               Dict[str, float] = Field(default_factory=dict)
+    produces:             Optional[str] = None
+    sample_ref:           Optional[str] = None
+    conditions:           Dict[str, float] = Field(default_factory=dict)
+    measures:             Optional[str] = None
+    condition_label:      Optional[str] = None
+    condition_value:      Optional[float] = None
+    condition_unit:       str = ""
+    free_params:          List[dict] = Field(default_factory=list)
+    objective_metric:     Optional[str] = None
+    optimiser_name:       Optional[str] = None
+    n_calls:              int = 20
+    n_initial_points:     int = 6
+    plot_code:            Optional[str] = None
+    analysis_code:        Optional[str] = None
+    sql:                  Optional[str] = None
+    description:          Optional[str] = None
+    editable_fields:      List[str] = Field(default_factory=list)
 
 
 class WorkflowPlan(BaseModel):
@@ -187,60 +219,45 @@ class WorkflowPlan(BaseModel):
 # ── Agent internals ───────────────────────────────────────────────────────────
 
 class AgentStateModel(BaseModel):
-    messages:              List[dict]  = Field(default_factory=list)
-    results_store:         List[dict]  = Field(default_factory=list)
+    messages:              List[dict] = Field(default_factory=list)
+    results_store:         List[dict] = Field(default_factory=list)
     last_llm_message:      Optional[dict] = None
-    last_tool_result:      Optional[Any]  = None
-    last_tools_used:       List[str]  = Field(default_factory=list)
+    last_tool_result:      Optional[Any] = None
+    last_tools_used:       List[str] = Field(default_factory=list)
     awaiting_confirmation: bool = False
     pending_tool_calls:    List[dict] = Field(default_factory=list)
 
 
-# ── Protocols ─────────────────────────────────────────────────────────────────
-
-class ProtocolEntry(BaseModel):
-    """
-    A saved experimental protocol — a reproducible record of a MAESTRO session.
-    Stores key user instructions and the resulting workflow plan for replay and adaptation.
-    """
-    protocol_id:        str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name:               str
-    description:        str = ""
-    created_at:         str = ""
-    created_by:         str = ""
-    tags:               List[str] = Field(default_factory=list)
-    user_instructions:  List[str] = Field(default_factory=list)
-    workflow_plan:      Optional[Dict[str, Any]] = None
-    results_summary:    str = ""
-    optimiser_used:     str = ""
-    notes:              str = ""
-
 # ── Equipment ─────────────────────────────────────────────────────────────────
 
 class EquipmentStatusModel(BaseModel):
-    llm:       bool = False
-    optimiser: bool = False
-    synthesiser: bool = False
+    llm:           bool = False
+    optimiser:     bool = False
+    synthesiser:   bool = False
     characteriser: bool = False
-    memory:    bool = False
-    knowledge: bool = False
-    reporting: bool = False
+    memory:        bool = False
+    knowledge:     bool = False
+    reporting:     bool = False
 
 
 # ── Results ───────────────────────────────────────────────────────────────────
 
-def make_result_entry(condition_label: str, condition_value: float, optimiser_name: str = "") -> dict:
+def make_result_entry(
+    condition_label: str,
+    condition_value: float,
+    optimiser_name:  str = "",
+) -> dict:
     return {
-        "condition_label":  condition_label,
-        "condition_value":  condition_value,
-        "optimiser_name":   optimiser_name,
-        "param_names":      [],
-        "X":                [],
-        "y":                [],
-        "best_params":      {},
-        "best_objective":   None,
-        "failed_samples":   0,
-        "attempts":         0,
+        "condition_label":    condition_label,
+        "condition_value":    condition_value,
+        "optimiser_name":     optimiser_name,
+        "param_names":        [],
+        "X":                  [],
+        "y":                  [],
+        "best_params":        {},
+        "best_objective":     None,
+        "failed_samples":     0,
+        "attempts":           0,
         "termination_reason": None,
     }
 
@@ -269,26 +286,6 @@ class CaseStudyExtraction(BaseModel):
     evidence_snippets: List[str] = Field(default_factory=list)
 
 
-# ── Resource Inventory ────────────────────────────────────────────────────────
-
-class ResourceConsumptionRule(BaseModel):
-    """Defines how much of a resource one instrument operation consumes."""
-    instrument_name: str
-    amount_per_use:  float
-    description:     str = ""
-
-
-class LabResource(BaseModel):
-    """A consumable resource tracked in the lab inventory."""
-    resource_id:   str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name:          str                        
-    unit:          str                        
-    current_stock: float = 0.0
-    min_stock:     float = 0.0                
-    description:   str = ""
-    consumption_rules: List[ResourceConsumptionRule] = Field(default_factory=list)    
-
-
 # ── Events ────────────────────────────────────────────────────────────────────
 
 class ExecutionEvent(BaseModel):
@@ -310,21 +307,21 @@ class ArtifactModel(BaseModel):
 # ── Session ───────────────────────────────────────────────────────────────────
 
 class SessionModel(BaseModel):
-    session_id:    str
-    agent_state:   AgentStateModel
-    outstanding_tasks:    List[dict] = Field(default_factory=list)
-    show_plotter_image:   Optional[str] = None
-    artifacts:            List[ArtifactModel] = Field(default_factory=list)
-    active_document_id:   Optional[str] = None
-    extracted_campaign:   Optional[CampaignSpec] = None
-    active_condition_key: str = ""
-    sample_registry:      List[Sample] = Field(default_factory=list)
-    pending_plan:         Optional[WorkflowPlan] = None
-    optimiser_config:     OptimiserConfig = Field(default_factory=OptimiserConfig)
-    equipment_status:     EquipmentStatusModel = Field(default_factory=EquipmentStatusModel)
-    current_activity:     Optional[str] = None
-    activity_log:         List[str] = Field(default_factory=list)
-    current_mission:      Optional[str] = None
+    session_id:             str
+    agent_state:            AgentStateModel
+    outstanding_tasks:      List[dict] = Field(default_factory=list)
+    show_plotter_image:     Optional[str] = None
+    artifacts:              List[ArtifactModel] = Field(default_factory=list)
+    active_document_id:     Optional[str] = None
+    extracted_campaign:     Optional[CampaignSpec] = None
+    active_condition_key:   str = ""
+    sample_registry:        List[Sample] = Field(default_factory=list)
+    pending_plan:           Optional[WorkflowPlan] = None
+    optimiser_config:       OptimiserConfig = Field(default_factory=OptimiserConfig)
+    equipment_status:       EquipmentStatusModel = Field(default_factory=EquipmentStatusModel)
+    current_activity:       Optional[str] = None
+    activity_log:           List[str] = Field(default_factory=list)
+    current_mission:        Optional[str] = None
     background_job_active:  bool = False
     background_job_label:   Optional[str] = None
     background_job_error:   Optional[str] = None
@@ -332,7 +329,6 @@ class SessionModel(BaseModel):
     background_job_index:   int = 0
     background_job_status:  str = "idle"
     step_statuses:          Dict[str, str] = Field(default_factory=dict)
-    # bo_iteration_counts tracks {step_id: current_iteration} for live progress display
     bo_iteration_counts:    Dict[str, int] = Field(default_factory=dict)
     projected_schedule:     List[ProjectedScheduleEntry] = Field(default_factory=list)
     live_event_queue:       List[ExecutionEvent] = Field(default_factory=list)
@@ -344,24 +340,30 @@ class SessionModel(BaseModel):
 class CreateSessionResponse(BaseModel):
     session_id: str
 
+
 class UserMessageRequest(BaseModel):
     session_id: str
     text:       str
+
 
 class ConfirmRequest(BaseModel):
     session_id: str
     proceed:    bool
 
+
 class ResetRequest(BaseModel):
     session_id: str
+
 
 class StateResponse(BaseModel):
     session_id: str
     state:      Dict[str, Any]
 
+
 class ExecutePlanRequest(BaseModel):
     session_id: str
     plan:       Dict[str, Any]
+
 
 class UpdateOptimiserRequest(BaseModel):
     session_id:       str

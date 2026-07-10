@@ -50,8 +50,6 @@ _NON_INSTRUMENT_ACTIONS = {
     "extract_and_check_feasibility",
 }
 
-_SYSTEM_PROMPT_CONTENT = ""
-
 
 def _total_chars(messages: list) -> int:
     return sum(len(str(m.get("content", ""))) for m in messages)

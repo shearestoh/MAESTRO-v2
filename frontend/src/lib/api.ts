@@ -1,7 +1,12 @@
 import type {
-  SessionState, VirtualInstrument, WorkflowPlan,
-  LabSettings, DocumentLibraryEntry, OptimisationLibraryEntry,
-  LabResource, ProtocolEntry,
+  SessionState,
+  VirtualInstrument,
+  WorkflowPlan,
+  LabSettings,
+  DocumentLibraryEntry,
+  OptimisationLibraryEntry,
+  LabResource,
+  ProtocolEntry,
 } from "@/types";
 
 const BASE = "/api";
@@ -21,7 +26,7 @@ async function request<T>(path: string, opts?: RequestInit): Promise<T> {
 export const api = {
   // ── Session ────────────────────────────────────────────────────────────────
   createSession: () =>
-    request<{ session_id: string }>("/session", { method: "POST", body: "{}" }),
+    request<{ session_id: string }>("/session", { method: "POST" }),
 
   getState: (sessionId: string) =>
     request<{ state: SessionState }>(`/state/${sessionId}`),
@@ -147,10 +152,10 @@ export const api = {
 
   // ── Optimiser config ───────────────────────────────────────────────────────
   updateSessionOptimiser: (
-    sessionId:       string,
-    name:            string,
-    nCalls:          number,
-    nInitialPoints:  number,
+    sessionId:      string,
+    name:           string,
+    nCalls:         number,
+    nInitialPoints: number,
   ) =>
     request<{ state: SessionState }>("/optimiser", {
       method: "POST",
@@ -199,7 +204,4 @@ export const api = {
 
   deleteProtocol: (protocolId: string) =>
     request<{ status: string }>(`/protocols/${protocolId}`, { method: "DELETE" }),
-
 };
-
-

@@ -11,27 +11,16 @@ function formatTime(iso: string): string {
 }
 
 function formatAxisLabel(date: Date, windowMs: number): string {
-  if (windowMs <= 120_000) {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  }
-  if (windowMs <= 7_200_000) {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-  return date.toLocaleString([], {
-    month: "short", day: "numeric",
-    hour: "2-digit", minute: "2-digit",
-  });
+  if (windowMs <= 120_000)   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  if (windowMs <= 7_200_000) return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-const ZOOM_LEVELS_MS = [
-  30_000, 60_000, 300_000, 600_000,
-  1_800_000, 3_600_000, 14_400_000, 86_400_000,
-];
+const ZOOM_LEVELS_MS = [30_000, 60_000, 300_000, 600_000, 1_800_000, 3_600_000, 14_400_000, 86_400_000];
 const ZOOM_LABELS    = ["30s", "1m", "5m", "10m", "30m", "1h", "4h", "24h"];
-const DEFAULT_ZOOM   = 3; // 10m
-const LABEL_WIDTH_PX = 128; // width of instrument name column
-
-const ALWAYS_SHOW = ["Electrode Coater", "Potentiostat"];
+const DEFAULT_ZOOM   = 3;
+const LABEL_WIDTH_PX = 128;
+const ALWAYS_SHOW    = ["Electrode Coater", "Potentiostat"];
 
 interface Tooltip { x: number; y: number; text: string; }
 
@@ -44,9 +33,10 @@ export function ResourceSchedule() {
   const [zoomIdx,  setZoomIdx]  = useState(DEFAULT_ZOOM);
   const [tooltip,  setTooltip]  = useState<Tooltip | null>(null);
   const [now,      setNow]      = useState(Date.now());
+  // Track dragging in state so cursor style re-renders correctly
+  const [isDragging, setIsDragging] = useState(false);
 
-  const trackAreaRef  = useRef<HTMLDivElement>(null); // the area EXCLUDING the label column
-  const isDragging    = useRef(false);
+  const trackAreaRef  = useRef<HTMLDivElement>(null);
   const dragStartX    = useRef(0);
   const dragStartView = useRef(0);
 
@@ -59,7 +49,6 @@ export function ResourceSchedule() {
   const windowMs  = ZOOM_LEVELS_MS[zoomIdx];
   const viewEndMs = viewStartMs + windowMs;
 
-  // pct() converts an absolute timestamp to a percentage of the track area width
   const pct = useCallback((isoOrMs: string | number): number => {
     const t = typeof isoOrMs === "string" ? new Date(isoOrMs).getTime() : isoOrMs;
     return ((t - viewStartMs) / windowMs) * 100;
@@ -67,57 +56,66 @@ export function ResourceSchedule() {
 
   const nowPct = pct(now);
 
-  // ── Scroll-wheel zoom around cursor ──────────────────────────────────────────
+  // ── Scroll-wheel zoom — stable ref to avoid re-registration ──────────────
+  // Store mutable values in refs so the wheel handler is stable
+  const viewStartMsRef = useRef(viewStartMs);
+  const windowMsRef    = useRef(windowMs);
+  const zoomIdxRef     = useRef(zoomIdx);
+
+  useEffect(() => { viewStartMsRef.current = viewStartMs; }, [viewStartMs]);
+  useEffect(() => { windowMsRef.current    = windowMs;    }, [windowMs]);
+  useEffect(() => { zoomIdxRef.current     = zoomIdx;     }, [zoomIdx]);
+
   const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
     const el = trackAreaRef.current;
     if (!el) return;
     const rect        = el.getBoundingClientRect();
     const cursorRatio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const cursorMs    = viewStartMs + cursorRatio * windowMs;
+    const cursorMs    = viewStartMsRef.current + cursorRatio * windowMsRef.current;
     const delta       = e.deltaY > 0 ? 1 : -1;
-    const newIdx      = Math.max(0, Math.min(ZOOM_LEVELS_MS.length - 1, zoomIdx + delta));
+    const newIdx      = Math.max(0, Math.min(ZOOM_LEVELS_MS.length - 1, zoomIdxRef.current + delta));
     const newWindowMs = ZOOM_LEVELS_MS[newIdx];
     setZoomIdx(newIdx);
     setViewStartMs(cursorMs - cursorRatio * newWindowMs);
-  }, [viewStartMs, windowMs, zoomIdx]);
+  }, []); // Stable — reads from refs
 
   useEffect(() => {
     const el = trackAreaRef.current;
     if (!el) return;
     el.addEventListener("wheel", handleWheel, { passive: false });
     return () => el.removeEventListener("wheel", handleWheel);
-  }, [handleWheel]);
+  }, [handleWheel]); // handleWheel is now stable — registers only once
 
-  // ── Click-drag pan ────────────────────────────────────────────────────────────
+  // ── Click-drag pan ────────────────────────────────────────────────────────
   const onMouseDown = useCallback((e: React.MouseEvent) => {
-    isDragging.current    = true;
+    setIsDragging(true);
     dragStartX.current    = e.clientX;
     dragStartView.current = viewStartMs;
     e.preventDefault();
   }, [viewStartMs]);
 
   const onMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!isDragging.current || !trackAreaRef.current) return;
+    if (!isDragging || !trackAreaRef.current) return;
     const rect    = trackAreaRef.current.getBoundingClientRect();
     const deltaMs = -((e.clientX - dragStartX.current) / rect.width) * windowMs;
     setViewStartMs(dragStartView.current + deltaMs);
-  }, [windowMs]);
+  }, [isDragging, windowMs]);
 
-  const onMouseUp = useCallback(() => { isDragging.current = false; }, []);
+  const onMouseUp = useCallback(() => setIsDragging(false), []);
 
-  // ── Data ──────────────────────────────────────────────────────────────────────
+  // ── Data ──────────────────────────────────────────────────────────────────
   const actualEntries: ResourceLogEntry[]       = state?.resource_log       ?? [];
   const projEntries:   ProjectedScheduleEntry[] = state?.projected_schedule ?? [];
   const bgActive = state?.background_job_active ?? false;
 
   const instrumentSet = new Set<string>(ALWAYS_SHOW);
   actualEntries.forEach((e) => {
-    if (e.instrument && !["unknown","memory","reporting","knowledge","optimiser",""].includes(e.instrument))
+    if (e.instrument && !["unknown", "memory", "reporting", "knowledge", "optimiser", ""].includes(e.instrument))
       instrumentSet.add(e.instrument);
   });
   projEntries.forEach((e) => {
-    if (e.instrument_name && !["unknown","memory","reporting","knowledge","optimiser",""].includes(e.instrument_name))
+    if (e.instrument_name && !["unknown", "memory", "reporting", "knowledge", "optimiser", ""].includes(e.instrument_name))
       instrumentSet.add(e.instrument_name);
   });
   const rows = Array.from(instrumentSet);
@@ -132,15 +130,14 @@ export function ResourceSchedule() {
   const COLOURS: Record<string, { actual: string; proj: string }> = {};
   rows.forEach((name, i) => { COLOURS[name] = palette[i % palette.length]; });
 
-  // ── Axis ticks ────────────────────────────────────────────────────────────────
-  const tickCount = 6;
-  const ticks = Array.from({ length: tickCount + 1 }, (_, i) => {
-    const ms  = viewStartMs + (i / tickCount) * windowMs;
-    const pct = (i / tickCount) * 100;
-    return { pct, label: formatAxisLabel(new Date(ms), windowMs) };
-  });
+  // ── Axis ticks ────────────────────────────────────────────────────────────
+  const TICK_COUNT = 6;
+  const ticks = Array.from({ length: TICK_COUNT + 1 }, (_, i) => ({
+    pct:   (i / TICK_COUNT) * 100,
+    label: formatAxisLabel(new Date(viewStartMs + (i / TICK_COUNT) * windowMs), windowMs),
+  }));
 
-  // ── Bar renderer ──────────────────────────────────────────────────────────────
+  // ── Bar renderer ──────────────────────────────────────────────────────────
   function renderBar(
     key:         string,
     startIso:    string,
@@ -153,8 +150,7 @@ export function ResourceSchedule() {
     const rp = pct(endIso);
     if (rp < 0 || lp > 100) return null;
     const cl = Math.max(0, lp);
-    const cr = Math.min(100, rp);
-    const w  = Math.max(0.3, cr - cl);
+    const w  = Math.max(0.3, Math.min(100, rp) - cl);
     return (
       <div
         key={key}
@@ -175,33 +171,28 @@ export function ResourceSchedule() {
     );
   }
 
-  // ── Navigation helpers ────────────────────────────────────────────────────────
+  // ── Navigation helpers ────────────────────────────────────────────────────
   const jumpToNow = () => setViewStartMs(Date.now() - windowMs * 0.25);
 
   const fitHistory = () => {
     if (!actualEntries.length) return;
-    const starts  = actualEntries.map((e) => new Date(e.start_time).getTime());
-    const ends    = actualEntries.map((e) => new Date(e.end_time).getTime());
+    const starts   = actualEntries.map((e) => new Date(e.start_time).getTime());
+    const ends     = actualEntries.map((e) => new Date(e.end_time).getTime());
     const earliest = Math.min(...starts);
     const latest   = Math.max(...ends, Date.now());
     const span     = latest - earliest;
-    const pad      = span * 0.1 || 5000;
-    let bestZoom   = ZOOM_LEVELS_MS.length - 1;
-    for (let i = 0; i < ZOOM_LEVELS_MS.length; i++) {
-      if (ZOOM_LEVELS_MS[i] >= span + pad * 2) { bestZoom = i; break; }
-    }
-    setZoomIdx(bestZoom);
+    const pad      = span * 0.1 || 5_000;
+    const bestZoom = ZOOM_LEVELS_MS.findIndex((ms) => ms >= span + pad * 2);
+    setZoomIdx(bestZoom === -1 ? ZOOM_LEVELS_MS.length - 1 : bestZoom);
     setViewStartMs(earliest - pad);
   };
 
   const hour     = new Date(now).getHours();
   const isOffice = hour >= 9 && hour < 17;
 
-  // ── Render ────────────────────────────────────────────────────────────────────
   return (
     <div className="glass-panel p-4 space-y-2" style={{ userSelect: "none", position: "relative" }}>
 
-      {/* Floating tooltip */}
       {tooltip && (
         <div
           className="fixed z-50 bg-slate-800 text-white text-[10px] rounded px-2 py-1 shadow-lg pointer-events-none whitespace-nowrap"
@@ -211,7 +202,6 @@ export function ResourceSchedule() {
         </div>
       )}
 
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h2 className="text-sm font-semibold text-slate-700">Task schedule</h2>
@@ -229,7 +219,6 @@ export function ResourceSchedule() {
         </div>
       </div>
 
-      {/* Toolbar */}
       <div className="flex items-center gap-2 text-xs">
         <button
           onClick={jumpToNow}
@@ -251,24 +240,15 @@ export function ResourceSchedule() {
         <span className="ml-auto text-[10px] text-slate-400">Scroll to zoom · Drag to pan</span>
       </div>
 
-      {/*
-        ── Gantt body ──
-        Layout: [label col 128px] [track area flex-1]
-        The "now" line is drawn ONCE as an overlay on the track area only,
-        so it aligns perfectly with the axis ticks which are also in the track area.
-      */}
       <div className="flex gap-0">
-
         {/* Label column */}
         <div style={{ width: LABEL_WIDTH_PX, flexShrink: 0 }}>
-          {/* Axis row spacer */}
           <div style={{ height: 28 }} />
-          {/* Instrument labels */}
           {rows.map((name) => (
             <div
               key={name}
               className="flex items-center justify-end pr-2 text-[10px] text-slate-500 font-medium"
-              style={{ height: 28, marginBottom: 6 }}
+              style={{ height: 22, marginBottom: 6 }}
               title={name}
             >
               <span className="truncate max-w-[110px]">{name}</span>
@@ -276,17 +256,17 @@ export function ResourceSchedule() {
           ))}
         </div>
 
-        {/* Track area — axis + bars, all in one coordinate space */}
+        {/* Track area */}
         <div
           ref={trackAreaRef}
           className="flex-1 relative overflow-hidden"
-          style={{ cursor: isDragging.current ? "grabbing" : "grab" }}
+          style={{ cursor: isDragging ? "grabbing" : "grab" }}
           onMouseDown={onMouseDown}
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}
           onMouseLeave={onMouseUp}
         >
-          {/* ── Axis row ── */}
+          {/* Axis row */}
           <div className="relative border-b border-slate-200" style={{ height: 28 }}>
             {ticks.map((tick, i) => (
               <div
@@ -295,32 +275,25 @@ export function ResourceSchedule() {
                 style={{ left: `${tick.pct}%`, transform: "translateX(-50%)" }}
               >
                 <div className="h-2 w-px bg-slate-300 mt-1" />
-                <span className="text-[9px] text-slate-400 whitespace-nowrap mt-0.5">
-                  {tick.label}
-                </span>
+                <span className="text-[9px] text-slate-400 whitespace-nowrap mt-0.5">{tick.label}</span>
               </div>
             ))}
-            {/* "now" label on axis */}
             {nowPct >= 0 && nowPct <= 100 && (
               <div
                 className="absolute top-0 flex flex-col items-center pointer-events-none"
                 style={{ left: `${nowPct}%`, transform: "translateX(-50%)" }}
               >
                 <div className="h-2 w-0.5 bg-red-400 mt-1" />
-                <span className="text-[9px] text-red-400 font-semibold whitespace-nowrap mt-0.5">
-                  now
-                </span>
+                <span className="text-[9px] text-red-400 font-semibold whitespace-nowrap mt-0.5">now</span>
               </div>
             )}
           </div>
 
-          {/* ── Instrument tracks ── */}
+          {/* Instrument tracks */}
           {rows.map((instName) => {
             const cfg      = COLOURS[instName] ?? palette[0];
             const actBars  = actualEntries.filter((e) => e.instrument === instName);
-            const projBars = projEntries.filter(
-              (e) => e.instrument_name === instName && e.is_projected
-            );
+            const projBars = projEntries.filter((e) => e.instrument_name === instName && e.is_projected);
 
             return (
               <div
@@ -328,7 +301,6 @@ export function ResourceSchedule() {
                 className="relative rounded"
                 style={{ height: 22, marginBottom: 6, backgroundColor: "#f1f5f9" }}
               >
-                {/* Grid lines at tick positions */}
                 {ticks.map((tick, i) => (
                   <div
                     key={i}
@@ -336,37 +308,19 @@ export function ResourceSchedule() {
                     style={{ left: `${tick.pct}%` }}
                   />
                 ))}
-
-                {/* "Now" vertical line — same pct as axis label */}
                 {nowPct >= 0 && nowPct <= 100 && (
                   <div
                     className="absolute top-0 bottom-0 w-0.5 bg-red-400 z-20 pointer-events-none"
                     style={{ left: `${nowPct}%` }}
                   />
                 )}
-
-                {/* Projected bars */}
                 {projBars.map((e, i) => {
                   const durS = ((new Date(e.end_time).getTime() - new Date(e.start_time).getTime()) / 1000).toFixed(0);
-                  return renderBar(
-                    `proj-${instName}-${i}`,
-                    e.start_time, e.end_time,
-                    cfg.proj,
-                    `Projected: ${e.label} (${durS}s)`,
-                    true,
-                  );
+                  return renderBar(`proj-${instName}-${i}`, e.start_time, e.end_time, cfg.proj, `Projected: ${e.label} (${durS}s)`, true);
                 })}
-
-                {/* Actual bars */}
                 {actBars.map((e, i) => {
                   const durS = ((new Date(e.end_time).getTime() - new Date(e.start_time).getTime()) / 1000).toFixed(1);
-                  return renderBar(
-                    `actual-${instName}-${i}`,
-                    e.start_time, e.end_time,
-                    cfg.actual,
-                    `${instName}: ${formatTime(e.start_time)} – ${formatTime(e.end_time)} (${durS}s)`,
-                    false,
-                  );
+                  return renderBar(`actual-${instName}-${i}`, e.start_time, e.end_time, cfg.actual, `${instName}: ${formatTime(e.start_time)} – ${formatTime(e.end_time)} (${durS}s)`, false);
                 })}
               </div>
             );
@@ -374,7 +328,6 @@ export function ResourceSchedule() {
         </div>
       </div>
 
-      {/* Legend */}
       <div className="flex items-center gap-4 text-[10px] text-slate-500 pt-1">
         <div className="flex items-center gap-1.5">
           <div className="w-5 h-2.5 rounded" style={{ backgroundColor: "#06b6d4" }} />
@@ -401,7 +354,6 @@ export function ResourceSchedule() {
         )}
       </div>
 
-      {/* Recent activity */}
       {actualEntries.length > 0 && (
         <div className="border-t border-slate-100 pt-2">
           <div className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider mb-1.5">

@@ -87,35 +87,35 @@ export function getBestOutput(sample: Sample, outputName: string): number | null
 export type StepStatus = "pending" | "running" | "completed" | "failed" | "skipped";
 
 export interface WorkflowStep {
-  step_id:          string;
-  kind:             string;
-  label:            string;
-  instrument?:      string;
-  instrument_id?:   string;
-  dependencies:     string[];
-  status:           StepStatus;
-  start_time?:      string;
-  end_time?:        string;
+  step_id:               string;
+  kind:                  string;
+  label:                 string;
+  instrument?:           string;
+  instrument_id?:        string;
+  dependencies:          string[];
+  status:                StepStatus;
+  start_time?:           string;
+  end_time?:             string;
   projected_start_time?: string;
   projected_end_time?:   string;
-  params?:          Record<string, number>;
-  produces?:        string;
-  sample_ref?:      string;
-  conditions?:      Record<string, number>;
-  measures?:        string;
-  condition_label?: string;
-  condition_value?: number;
-  condition_unit?:  string;
-  free_params?:     Array<{ name: string; min: number; max: number; unit: string }>;
-  objective_metric?: string;
-  optimiser_name?:  string;
-  n_calls?:         number;
-  n_initial_points?: number;
-  plot_code?:       string;
-  analysis_code?:   string;
-  sql?:             string;
-  description?:     string;
-  editable_fields?: string[];
+  params?:               Record<string, number>;
+  produces?:             string;
+  sample_ref?:           string;
+  conditions?:           Record<string, number>;
+  measures?:             string;
+  condition_label?:      string;
+  condition_value?:      number;
+  condition_unit?:       string;
+  free_params?:          Array<{ name: string; min: number; max: number; unit: string }>;
+  objective_metric?:     string;
+  optimiser_name?:       string;
+  n_calls?:              number;
+  n_initial_points?:     number;
+  plot_code?:            string;
+  analysis_code?:        string;
+  sql?:                  string;
+  description?:          string;
+  editable_fields?:      string[];
 }
 
 export interface WorkflowPlan {
@@ -143,7 +143,7 @@ export interface ProjectedScheduleEntry {
 export interface ResultEntry {
   condition_label:    string;
   condition_value:    number;
-  optimiser_name:     string; 
+  optimiser_name:     string;
   X:                  number[][];
   y:                  number[];
   best_params:        Record<string, number>;
@@ -262,18 +262,18 @@ export interface EquipmentNodeData {
 // ── Instrument Registry ───────────────────────────────────────────────────────
 
 export interface VirtualInstrument {
-  tool_id:      string;
-  name:         string;
-  kind:         string;
-  category:     "physical" | "computational";
-  sub_category: string;
-  description:  string;
-  parameters:   InstrumentParameter[];
-  outputs:      InstrumentOutput[];
-  failure_modes:InstrumentFailureMode[];
-  time_cost_s:  number;
-  enabled:      boolean;
-  is_default:   boolean;
+  tool_id:       string;
+  name:          string;
+  kind:          string;
+  category:      "physical" | "computational";
+  sub_category:  string;
+  description:   string;
+  parameters:    InstrumentParameter[];
+  outputs:       InstrumentOutput[];
+  failure_modes: InstrumentFailureMode[];
+  time_cost_s:   number;
+  enabled:       boolean;
+  is_default:    boolean;
 }
 
 export interface InstrumentParameter {
@@ -345,19 +345,18 @@ export interface LabResource {
 }
 
 // ── Protocols ─────────────────────────────────────────────────────────────────
+// Matches the backend ProtocolEntry model exactly.
 
 export interface ProtocolEntry {
-  protocol_id:        string;
-  name:               string;
-  description:        string;
-  created_at:         string;
-  created_by:         string;
-  tags:               string[];
-  user_instructions:  string[];
-  workflow_plan:      Record<string, unknown> | null;
-  results_summary:    string;
-  optimiser_used:     string;
-  notes:              string;
+  protocol_id:       string;
+  name:              string;
+  description:       string;
+  created_at:        string;
+  optimiser_used:    string;
+  results_summary:   string;
+  user_instructions: string[];
+  workflow_plan:     Record<string, unknown> | null;
+  notes:             string;
 }
 
 // ── Lab Settings ──────────────────────────────────────────────────────────────

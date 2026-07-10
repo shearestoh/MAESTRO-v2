@@ -2,9 +2,22 @@ import { useEffect, useRef, useCallback } from "react";
 import { useMaestroStore } from "@/store/maestroStore";
 import type { WsEvent } from "@/types";
 
-const BASE_RECONNECT_DELAY = 1000;
-const MAX_RECONNECT_DELAY  = 30000;
+const BASE_RECONNECT_DELAY = 1_000;
+const MAX_RECONNECT_DELAY  = 30_000;
 const MAX_RECONNECTS       = 12;
+
+// Events that should trigger a state refresh
+const REFRESH_EVENT_TYPES = new Set([
+  "job_complete",
+  "optimiser_complete",
+  "synthesiser_done",
+  "characteriser_done",
+  "memory_update",
+  "feasibility_result",
+  "knowledge_done",
+  "plotter_done",
+  "analysis_done",
+]);
 
 export function useWebSocket() {
   const sessionId    = useMaestroStore((s) => s.sessionId);
@@ -21,11 +34,9 @@ export function useWebSocket() {
     if (!sessionId || !mounted.current) return;
 
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const host     = window.location.host;
-    const url      = `${protocol}://${host}/ws/${sessionId}`;
-
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
+    const url      = `${protocol}://${window.location.host}/ws/${sessionId}`;
+    const ws       = new WebSocket(url);
+    wsRef.current  = ws;
 
     ws.onopen = () => {
       reconnects.current = 0;
@@ -36,31 +47,30 @@ export function useWebSocket() {
       try {
         const event = JSON.parse(ev.data as string) as WsEvent;
 
-        if (event.event_type !== "state_update") {
-          pushWsEvent(event);
-        }
-
         if (event.event_type === "state_update") {
-          refreshState();
           const payload = event.payload as Record<string, unknown>;
+          // Refresh on job completion events
           if (payload.job_complete === true) {
             refreshState();
-            setTimeout(() => refreshState(), 300);
-            setTimeout(() => refreshState(), 800);
-          }
-          if (
+            setTimeout(() => refreshState(), 400);
+          } else if (
             payload.background_job_active === false &&
             payload.background_job_status === "completed"
           ) {
             setTimeout(() => refreshState(), 500);
           }
+          return;
         }
 
-        if (event.equipment !== null && event.equipment !== undefined) {
+        // Push displayable events to the log
+        pushWsEvent(event);
+
+        // Refresh state only on meaningful completion events, not every event
+        if (REFRESH_EVENT_TYPES.has(event.event_type)) {
           refreshState();
         }
       } catch {
-        // ignore malformed frames
+        // Ignore malformed frames
       }
     };
 
