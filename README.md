@@ -1,8 +1,8 @@
 # MAESTRO
 
-**Materials Acceleration Engine for Synthesis, Testing and Research Orchestration**
+**Materials Acceleration Platform for Synthesis, Testing and Orchestration**
 
-MAESTRO is an open-source, domain-agnostic platform for agentic scientific discovery in self-driving laboratories. Scientists interact with an LLM-powered orchestrator via a chat interface to design, execute, and analyse experimental campaigns — with human approval at every instrument action.
+MAESTRO is an open-source, domain-agnostic agentic orchestration platform for self-driving scientific laboratories. Scientists interact with an LLM-powered orchestrator via a natural language chat interface to design, execute, and analyse experimental campaigns — with human approval at every instrument action.
 
 ## Features
 
@@ -35,7 +35,5 @@ uv run uvicorn main:app --reload
 
 ```bash
 cd frontend
-uv mineru
-uv run mineru-models-download
 npm run dev
 ```

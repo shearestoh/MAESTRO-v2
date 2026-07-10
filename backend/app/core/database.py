@@ -268,3 +268,16 @@ def update_protocol_notes(protocol_id: str, notes: str) -> None:
             (notes, protocol_id),
         )
         con.commit()
+
+def update_protocol_field(protocol_id: str, field: str, value: str) -> bool:
+    """Update a single text field on a protocol. Only safe fields are permitted."""
+    allowed = {"notes", "name", "description", "results_summary"}
+    if field not in allowed:
+        return False
+    with _db_connection() as con:
+        cur = con.execute(
+            f"UPDATE protocols SET {field} = ? WHERE protocol_id = ?",
+            (value, protocol_id),
+        )
+        con.commit()
+        return cur.rowcount > 0

@@ -56,14 +56,15 @@ export const api = {
     }),
 
   // ── Documents ──────────────────────────────────────────────────────────────
-  uploadDocument: async (sessionId: string, file: File) => {
+  uploadDocument: async (sessionId: string, file: File, docType: "paper" | "manual" = "paper") => {
     const form = new FormData();
     form.append("session_id", sessionId);
-    form.append("file", file);
+    form.append("doc_type",   docType);
+    form.append("file",       file);
     const res = await fetch(`${BASE}/documents/upload`, { method: "POST", body: form });
     if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
     return res.json();
-  },
+  },  
 
   getDocumentStructure: (documentId: string) =>
     request<{

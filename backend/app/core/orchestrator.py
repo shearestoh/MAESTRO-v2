@@ -135,6 +135,75 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
     return session
 
 
+def _check_plan_feasibility(session, steps: list) -> str | None:
+    """
+    Check whether the proposed workflow steps are feasible given registered instruments.
+    Returns a warning message string if infeasible, None if feasible.
+    Called automatically before presenting any workflow plan to the user.
+    """
+    from app.core.tool_registry import TOOL_REGISTRY
+
+    instrument_steps = [
+        s for s in steps
+        if s.get("kind") in ("synthesise", "characterise", "optimise_condition")
+    ]
+    if not instrument_steps:
+        return None  # No instrument steps — nothing to check
+
+    required_params  = set()
+    required_outputs = set()
+
+    for step in instrument_steps:
+        kind = step.get("kind")
+        if kind == "synthesise":
+            for k in (step.get("params") or {}).keys():
+                required_params.add(k)
+        elif kind == "characterise":
+            measures = step.get("measures")
+            if measures:
+                required_outputs.add(measures)
+            for k in (step.get("conditions") or {}).keys():
+                required_params.add(k)
+        elif kind == "optimise_condition":
+            for fp in (step.get("free_params") or []):
+                required_params.add(fp.get("name", ""))
+            objective = step.get("objective_metric")
+            if objective:
+                required_outputs.add(objective)
+
+    required_params  = {p for p in required_params  if p}
+    required_outputs = {o for o in required_outputs if o}
+
+    if not required_params and not required_outputs:
+        return None
+
+    feasibility = TOOL_REGISTRY.check_feasibility(
+        list(required_params), list(required_outputs)
+    )
+
+    if feasibility["feasible"]:
+        return None
+
+    missing_p = feasibility.get("missing_params", [])
+    missing_o = feasibility.get("missing_outputs", [])
+    parts = []
+    if missing_p:
+        parts.append(f"parameters not controllable by any instrument: **{', '.join(missing_p)}**")
+    if missing_o:
+        parts.append(f"objectives not measurable by any instrument: **{', '.join(missing_o)}**")
+
+    available_p = feasibility.get("available_params", [])
+    available_o = feasibility.get("available_outputs", [])
+
+    warning = (
+        f"⚠️ **Feasibility check failed.** This workflow requires {' and '.join(parts)}.\n\n"
+        f"Registered instruments can control: {available_p or 'none'}\n"
+        f"Registered instruments can measure: {available_o or 'none'}\n\n"
+        f"Please register the appropriate instruments in Lab Setup, or adjust the workflow."
+    )
+    return warning
+
+
 def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_names):
     has_feasibility   = any(n == "extract_and_check_feasibility" for n in pending_names)
     has_plan_workflow = any(n == "plan_workflow" for n in pending_names)
@@ -149,7 +218,7 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
         for tc in pending_calls:
             if tc["function"]["name"] != "extract_and_check_feasibility":
                 continue
-            args = _safe_parse_args(tc)
+            args      = _safe_parse_args(tc)
             case_name = args.get("case_name", "Case Study")
             session.agent_state.messages.append({
                 "role":         "tool",
@@ -178,14 +247,13 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
 
     if has_plan_workflow:
         all_steps: list[WorkflowStep] = []
-        summaries: list[str] = []
+        summaries: list[str]          = []
 
         for tc in pending_calls:
             if tc["function"]["name"] != "plan_workflow":
                 continue
             args = _safe_parse_args(tc)
             summaries.append(args.get("summary", ""))
-
             for s in args.get("steps", []):
                 s = _normalise_step(s, session)
                 try:
@@ -198,6 +266,27 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
                 "role": "assistant",
                 "content": "I couldn't build a valid workflow plan. Please try describing the steps again.",
             })
+            return
+
+        # ── Capability check — runs for ALL proposed workflows ────────────────
+        feasibility_warning = _check_plan_feasibility(
+            session, [s.model_dump() for s in all_steps]
+        )
+        if feasibility_warning:
+            session.agent_state.messages.append({
+                "role": "assistant", "content": feasibility_warning,
+            })
+            for tc in pending_calls:
+                if tc["function"]["name"] == "plan_workflow":
+                    session.agent_state.messages.append({
+                        "role":         "tool",
+                        "tool_call_id": tc["id"],
+                        "name":         "plan_workflow",
+                        "content":      json.dumps({
+                            "status":  "rejected",
+                            "message": "Workflow rejected — instrument capability check failed.",
+                        }),
+                    })
             return
 
         combined_summary = (
@@ -223,7 +312,6 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
                         "message": "Workflow plan presented to user for approval.",
                     }),
                 })
-
 
 def _execute_non_instrument_actions(session, lock, plan, pending_calls):
     with lock:

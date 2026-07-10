@@ -178,7 +178,11 @@ def reset_route(req: ResetRequest):
 # ── Documents ─────────────────────────────────────────────────────────────────
 
 @router.post("/documents/upload")
-async def upload_document(session_id: str = Form(...), file: UploadFile = File(...)):
+async def upload_document(
+    session_id: str      = Form(...),
+    doc_type:   str      = Form("paper"),
+    file:       UploadFile = File(...),
+):
     session = _get_session_or_404(session_id)
 
     def _emit(event_type: str, message: str):
@@ -187,6 +191,10 @@ async def upload_document(session_id: str = Form(...), file: UploadFile = File(.
             equipment="knowledge", category="knowledge", payload={},
         ))
         session.current_activity = message
+
+    # Validate doc_type
+    if doc_type not in ("paper", "manual"):
+        doc_type = "paper"
 
     try:
         session.equipment_status.knowledge = True
@@ -208,14 +216,15 @@ async def upload_document(session_id: str = Form(...), file: UploadFile = File(.
             summary=doc.summary,
             uploaded_at=datetime.utcnow().isoformat(),
             file_bytes=file_bytes,
+            doc_type=doc_type,   # ← pass through the actual doc_type
         )
 
-        _emit("knowledge_summarise", "Summarising paper content...")
+        _emit("knowledge_summarise", "Summarising content...")
         await asyncio.sleep(0.05)
         doc.summary = await loop.run_in_executor(None, _summarise_document, doc)
 
         session.active_document_id = doc.document_id
-        session.current_mission    = f"Paper: {doc.filename}"
+        session.current_mission    = f"{'Manual' if doc_type == 'manual' else 'Paper'}: {doc.filename}"
 
         meta_lines = []
         if doc.authors:
@@ -234,9 +243,26 @@ async def upload_document(session_id: str = Form(...), file: UploadFile = File(.
             if doc.sections else ""
         )
 
+        type_label = "Equipment manual" if doc_type == "manual" else "Paper"
+        if doc_type == "manual":
+            followup = (
+                f"What would you like to do? I can:\n"
+                f"- Answer questions about operating limits, safety constraints, or procedures\n"
+                f"- Extract parameter ranges for instrument configuration\n"
+                f"- Reference this manual when proposing experimental parameters"
+            )
+        else:
+            followup = (
+                f"What would you like to do? I can:\n"
+                f"- Summarise the paper in more detail\n"
+                f"- Answer questions about authors, year, methods, or findings\n"
+                f"- Extract and check feasibility of a specific case study\n"
+                f"- Reproduce a result (tell me which case study or figure)"
+            )
+
         session.live_event_queue.append(ExecutionEvent(
             event_type="knowledge_done",
-            message=f"Paper loaded: {len(doc.sections)} sections, {len(doc.figures)} figures, {len(doc.tables)} tables.",
+            message=f"{type_label} loaded: {len(doc.sections)} sections, {len(doc.figures)} figures.",
             equipment="knowledge",
             category="knowledge",
             payload={"sections": len(doc.sections), "figures": len(doc.figures), "tables": len(doc.tables)},
@@ -246,14 +272,10 @@ async def upload_document(session_id: str = Form(...), file: UploadFile = File(.
         session.agent_state.messages.append({
             "role": "assistant",
             "content": (
-                f"{doc.summary or f'Paper **{doc.filename}** ingested.'}"
+                f"{doc.summary or f'**{doc.filename}** ingested.'}"
                 f"{''.join(meta_lines)}"
                 f" (parsed with MinerU){section_note}\n\n"
-                f"What would you like to do? I can:\n"
-                f"- Summarise the paper in more detail\n"
-                f"- Answer questions about authors, year, methods, or findings\n"
-                f"- Extract and check feasibility of a specific case study\n"
-                f"- Reproduce a result (tell me which case study or figure)"
+                f"{followup}"
             ),
         })
 
@@ -263,6 +285,7 @@ async def upload_document(session_id: str = Form(...), file: UploadFile = File(.
         return {
             "status":      "ok",
             "document_id": doc.document_id,
+            "doc_type":    doc_type,
             "sections":    len(doc.sections),
             "figures":     len(doc.figures),
             "tables":      len(doc.tables),
@@ -273,7 +296,6 @@ async def upload_document(session_id: str = Form(...), file: UploadFile = File(.
         session.equipment_status.knowledge = False
         session.current_activity           = None
         raise HTTPException(500, f"{type(e).__name__}: {e}")
-
 
 @router.get("/documents/{document_id}/structure")
 def get_document_structure(document_id: str):
@@ -569,8 +591,11 @@ def save_protocol(data: dict):
 
 @router.put("/protocols/{protocol_id}")
 def update_protocol(protocol_id: str, updates: dict):
-    if "notes" in updates and len(updates) == 1:
-        update_protocol_notes(protocol_id, updates["notes"])
+    single_field_updates = {"notes", "name", "description", "results_summary"}
+    if len(updates) == 1 and next(iter(updates)) in single_field_updates:
+        field = next(iter(updates))
+        from app.core.database import update_protocol_field
+        update_protocol_field(protocol_id, field, updates[field])
     else:
         protocols = get_all_protocols()
         existing  = next((p for p in protocols if p["protocol_id"] == protocol_id), None)

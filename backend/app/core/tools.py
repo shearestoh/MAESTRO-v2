@@ -1094,87 +1094,175 @@ def execute_plan_step(
 
 def _default_summary_plot_code() -> str:
     return textwrap.dedent("""
+# Generic summary plot — adapts to whatever data is available.
+# Inspects results_store structure at runtime; never assumes field names.
+
 import math
 
+def safe_float(v):
+    try: return float(v)
+    except: return None
+
 if not results_store:
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.text(0.5, 0.5, "No results yet", ha="center", va="center", transform=ax.transAxes)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.text(0.5, 0.5, "No experimental results yet.", ha="center", va="center",
+            transform=ax.transAxes, fontsize=12, color="#94a3b8")
     ax.set_axis_off()
 else:
-    # Group results by optimiser for comparison
-    optimisers = list(dict.fromkeys(r.get("optimiser_name", "unknown") for r in results_store))
-    conditions = sorted(list(dict.fromkeys(r.get("condition_value", 0) for r in results_store)))
-    cond_label = results_store[0].get("condition_label", "condition") if results_store else "condition"
+    # ── Discover data structure dynamically ──────────────────────────────────
+    all_param_names = []
+    for r in results_store:
+        for p in r.get("param_names", []):
+            if p not in all_param_names:
+                all_param_names.append(p)
 
-    n_cols  = min(3, len(results_store) + 1)
-    n_total = len(results_store) + 1
-    n_rows  = math.ceil(n_total / n_cols)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
-    axes = np.atleast_1d(axes).ravel()
+    has_X         = any(len(r.get("X", [])) > 0 for r in results_store)
+    has_y         = any(len(r.get("y", [])) > 0 for r in results_store)
+    has_best      = any(r.get("best_objective") is not None for r in results_store)
+    n_params      = len(all_param_names)
+    n_results     = len(results_store)
+    cond_label    = results_store[0].get("condition_label", "condition") if results_store else "condition"
+    optimisers    = list(dict.fromkeys(r.get("optimiser_name", "") for r in results_store))
 
-    for i, res in enumerate(results_store[:len(axes) - 1]):
-        ax = axes[i]
-        cond_value  = res.get("condition_value", 0)
-        opt_name    = res.get("optimiser_name", "")
-        param_names = res.get("param_names", ["param_1", "param_2"])
-        x_label     = param_names[0] if param_names else "param_1"
-        y_label     = param_names[1] if len(param_names) > 1 else "param_2"
-        title       = f"{cond_label}={cond_value}"
-        if opt_name:
-            title += f"\\n[{opt_name}]"
+    # ── Layout: decide number of panels ──────────────────────────────────────
+    panels = []
+    if has_y:
+        panels.append("convergence")   # best-so-far vs iteration
+    if has_best and n_results > 1:
+        panels.append("optimality")    # best objective vs condition
+    if has_X and n_params >= 2:
+        panels.append("scatter_2d")    # 2D parameter space coloured by objective
+    if has_X and n_params == 1:
+        panels.append("scatter_1d")    # 1D: param vs objective
+    if not panels:
+        panels.append("summary_text")  # fallback: text summary
 
-        if not res.get("X"):
-            ax.set_title(title, fontsize=8); ax.set_axis_off(); continue
+    n_cols = min(3, len(panels))
+    n_rows = math.ceil(len(panels) / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.5 * n_cols, 4 * n_rows), squeeze=False)
+    axes_flat = axes.ravel()
+    palette   = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2"]
 
-        X = np.array(res["X"])
-        y = np.array(res["y"])
-        sc = ax.scatter(
-            X[:, 0],
-            X[:, 1] if X.shape[1] > 1 else np.zeros(len(X)),
-            c=y, cmap="plasma", s=40,
-        )
-        bp = res.get("best_params", {})
-        bx = bp.get(x_label)
-        by = bp.get(y_label)
-        if bx is not None and by is not None:
-            ax.scatter([bx], [by], facecolors="none", edgecolors="black", s=120, linewidths=1.5, label="Best")
+    for panel_idx, panel in enumerate(panels):
+        ax = axes_flat[panel_idx]
+
+        if panel == "convergence":
+            # Best-so-far vs iteration for each (condition, optimiser) pair
+            for ri, r in enumerate(results_store):
+                y_vals = r.get("y", [])
+                if not y_vals:
+                    continue
+                best_so_far = [max(y_vals[:i+1]) for i in range(len(y_vals))]
+                cval        = r.get("condition_value", ri)
+                opt_name    = r.get("optimiser_name", "")
+                lbl         = f"{cond_label}={cval}"
+                if opt_name:
+                    lbl += f" [{opt_name}]"
+                col = palette[ri % len(palette)]
+                ax.plot(range(1, len(best_so_far) + 1), best_so_far,
+                        "o-", color=col, linewidth=1.8, markersize=4, label=lbl, alpha=0.85)
+            ax.set_title("Convergence (best so far)", fontsize=9)
+            ax.set_xlabel("Iteration", fontsize=8)
+            ax.set_ylabel("Best objective", fontsize=8)
+            ax.legend(fontsize=7, loc="lower right")
+            ax.grid(True, alpha=0.25)
+
+        elif panel == "optimality":
+            # Best objective vs condition value, grouped by optimiser
+            for oi, opt_name in enumerate(optimisers):
+                opt_results = sorted(
+                    [r for r in results_store
+                     if r.get("optimiser_name", "") == opt_name
+                     and r.get("best_objective") is not None],
+                    key=lambda r: safe_float(r.get("condition_value", 0)) or 0,
+                )
+                if not opt_results:
+                    continue
+                xs  = [safe_float(r.get("condition_value", 0)) or 0 for r in opt_results]
+                ys  = [r["best_objective"] for r in opt_results]
+                col = palette[oi % len(palette)]
+                lbl = opt_name or "unknown"
+                ax.plot(xs, ys, "o-", color=col, linewidth=2, markersize=8,
+                        label=lbl, alpha=0.85)
+            ax.set_title("Optimality path", fontsize=9)
+            ax.set_xlabel(cond_label, fontsize=8)
+            ax.set_ylabel("Best objective", fontsize=8)
             ax.legend(fontsize=7)
-        ax.set_title(title, fontsize=8)
-        ax.set_xlabel(x_label, fontsize=8)
-        ax.set_ylabel(y_label, fontsize=8)
-        fig.colorbar(sc, ax=ax).set_label("Objective", fontsize=7)
+            ax.grid(True, alpha=0.25)
 
-    for ax in axes[len(results_store):-1]:
-        ax.set_visible(False)
+        elif panel == "scatter_2d":
+            # First two parameters coloured by objective, one subplot per result
+            # If multiple results, show the first one that has data
+            plotted = False
+            for ri, r in enumerate(results_store):
+                X_raw = r.get("X", [])
+                y_raw = r.get("y", [])
+                p_names = r.get("param_names", all_param_names)
+                if not X_raw or not y_raw or len(p_names) < 2:
+                    continue
+                X = np.array(X_raw)
+                y = np.array(y_raw)
+                if X.ndim != 2 or X.shape[1] < 2:
+                    continue
+                sc = ax.scatter(X[:, 0], X[:, 1], c=y, cmap="plasma", s=40, alpha=0.8)
+                bp = r.get("best_params", {})
+                bx = safe_float(bp.get(p_names[0]))
+                by = safe_float(bp.get(p_names[1]))
+                if bx is not None and by is not None:
+                    ax.scatter([bx], [by], facecolors="none", edgecolors="black",
+                               s=120, linewidths=1.5, zorder=5, label="Best")
+                    ax.legend(fontsize=7)
+                cval = r.get("condition_value", ri)
+                ax.set_title(f"{cond_label}={cval}", fontsize=9)
+                ax.set_xlabel(p_names[0], fontsize=8)
+                ax.set_ylabel(p_names[1], fontsize=8)
+                fig.colorbar(sc, ax=ax).set_label("Objective", fontsize=7)
+                plotted = True
+                break  # one panel for 2D scatter
+            if not plotted:
+                ax.set_axis_off()
+                ax.text(0.5, 0.5, "Insufficient data for 2D scatter",
+                        ha="center", va="center", transform=ax.transAxes, fontsize=8, color="#94a3b8")
 
-    # Final panel: optimality path — best objective vs condition, grouped by optimiser
-    ax_path = axes[-1]
-    colours = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed"]
-    has_data = False
-    for oi, opt_name in enumerate(optimisers):
-        opt_results = [r for r in results_store if r.get("optimiser_name", "") == opt_name and r.get("best_objective") is not None]
-        if not opt_results:
-            continue
-        opt_results.sort(key=lambda r: r.get("condition_value", 0))
-        xs  = [r.get("condition_value", 0) for r in opt_results]
-        ys  = [r.get("best_objective", 0)  for r in opt_results]
-        col = colours[oi % len(colours)]
-        ax_path.plot(xs, ys, "o-", color=col, linewidth=2, markersize=8,
-                     label=opt_name or "unknown", alpha=0.85)
-        has_data = True
+        elif panel == "scatter_1d":
+            # Single parameter vs objective
+            for ri, r in enumerate(results_store):
+                X_raw   = r.get("X", [])
+                y_raw   = r.get("y", [])
+                p_names = r.get("param_names", all_param_names)
+                if not X_raw or not y_raw:
+                    continue
+                X   = np.array(X_raw)
+                y   = np.array(y_raw)
+                col = palette[ri % len(palette)]
+                cval = r.get("condition_value", ri)
+                lbl  = f"{cond_label}={cval}"
+                x_vals = X[:, 0] if X.ndim == 2 else X
+                ax.scatter(x_vals, y, color=col, s=40, alpha=0.7, label=lbl)
+            ax.set_title("Parameter vs Objective", fontsize=9)
+            ax.set_xlabel(all_param_names[0] if all_param_names else "parameter", fontsize=8)
+            ax.set_ylabel("Objective", fontsize=8)
+            ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.25)
 
-    if has_data:
-        ax_path.set_title("Optimality path", fontsize=9)
-        ax_path.set_xlabel(cond_label, fontsize=8)
-        ax_path.set_ylabel("Best Objective", fontsize=8)
-        ax_path.legend(fontsize=7)
-        ax_path.grid(True, alpha=0.3)
-    else:
-        ax_path.set_title("Optimality path")
-        ax_path.text(0.5, 0.5, "No results yet", ha="center", va="center")
-        ax_path.set_axis_off()
+        elif panel == "summary_text":
+            ax.set_axis_off()
+            lines = ["Summary"]
+            for r in results_store:
+                best = r.get("best_objective")
+                n    = len(r.get("X", []))
+                cval = r.get("condition_value", "?")
+                lines.append(f"{cond_label}={cval}: n={n}, best={best:.4f if best is not None else 'N/A'}")
+            ax.text(0.05, 0.95, "\n".join(lines), transform=ax.transAxes,
+                    fontsize=8, va="top", fontfamily="monospace")
+
+    # Hide unused axes
+    for i in range(len(panels), len(axes_flat)):
+        axes_flat[i].set_axis_off()
+
+fig.suptitle("MAESTRO — Experimental Summary", fontsize=10, y=1.01)
+plt.tight_layout()
 """).strip()
-
 
 # ── Plan builder ──────────────────────────────────────────────────────────────
 

@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from "react";
-import { useMaestroStore }   from "@/store/maestroStore";
-import { api }               from "@/lib/api";
-import { cn }                from "@/lib/utils";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { Edit3, ChevronDown, ChevronRight } from "lucide-react";
+import { useMaestroStore } from "@/store/maestroStore";
+import { api }             from "@/lib/api";
+import { cn }              from "@/lib/utils";
 import {
   Plus, Trash2, Save, Upload, FileText,
   CheckCircle2, Loader2, FlaskConical, Cpu, ExternalLink,
@@ -616,6 +617,7 @@ function LibraryTab() {
   const refreshState = useMaestroStore((s) => s.refreshState);
   const [library,   setLibrary]   = useState<DocumentLibraryEntry[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [docType,   setDocType]   = useState<"paper" | "manual">("paper");
   const [loading,   setLoading]   = useState(true);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -631,10 +633,14 @@ function LibraryTab() {
     if (!file || !sessionId) return;
     setUploading(true);
     try {
-      await api.uploadDocument(sessionId, file);
+      // Upload runs to completion even if user navigates away —
+      // we don't await navigation, just the fetch itself.
+      await api.uploadDocument(sessionId, file, docType);
       const res = await api.listLibrary();
       setLibrary(res.documents);
       await refreshState();
+    } catch (err) {
+      console.error("Upload failed:", err);
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -654,22 +660,45 @@ function LibraryTab() {
       <div className="glass-panel p-4 space-y-3">
         <h3 className="text-sm font-semibold text-slate-700">Upload Document</h3>
         <p className="text-xs text-slate-500">
-          Documents uploaded here are available to MAESTRO across all sessions
-          for question answering and campaign extraction. Authors, year, DOI,
-          and journal are automatically extracted.
+          Documents are parsed with MinerU (sections, figures, tables extracted) and
+          made available to MAESTRO across all sessions. Select the document type before uploading.
         </p>
+
+        {/* Doc type selector */}
+        <div className="flex gap-2">
+          {(["paper", "manual"] as const).map((type) => (
+            <button
+              key={type}
+              onClick={() => setDocType(type)}
+              className={cn(
+                "px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors",
+                docType === type
+                  ? "bg-blue-600 text-white border-blue-600"
+                  : "bg-white text-slate-600 border-slate-300 hover:border-blue-400",
+              )}
+            >
+              {type === "paper" ? "📄 Scientific Paper" : "📋 Equipment Manual"}
+            </button>
+          ))}
+        </div>
+
         <div className="flex items-center gap-3">
           <input ref={fileRef} type="file" accept=".pdf" className="hidden" onChange={handleUpload} />
           <button
             onClick={() => fileRef.current?.click()}
-            disabled={uploading}
+            disabled={uploading || !sessionId}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors disabled:opacity-50"
           >
             {uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
-            {uploading ? "Uploading..." : "Upload PDF"}
+            {uploading ? "Uploading..." : `Upload ${docType === "paper" ? "Paper" : "Manual"}`}
           </button>
           {!sessionId && (
             <span className="text-xs text-amber-600">Start a session on the Dashboard first.</span>
+          )}
+          {uploading && (
+            <span className="text-xs text-blue-600 animate-pulse">
+              Processing with MinerU — this may take a minute...
+            </span>
           )}
         </div>
       </div>
@@ -680,7 +709,7 @@ function LibraryTab() {
         documents={papers}
         loading={loading}
         onRemove={handleRemove}
-        emptyMessage="No papers uploaded. Upload research papers for MAESTRO to reference."
+        emptyMessage="No papers uploaded. Upload research papers for MAESTRO to reference and reproduce."
       />
 
       <DocumentSection
@@ -689,7 +718,7 @@ function LibraryTab() {
         documents={manuals}
         loading={loading}
         onRemove={handleRemove}
-        emptyMessage="No manuals uploaded. Upload instrument manuals for MAESTRO to reference safety limits."
+        emptyMessage="No manuals uploaded. Upload instrument manuals so MAESTRO can enforce operating limits and safety constraints."
       />
 
       <ProtocolsSection />
@@ -1215,21 +1244,28 @@ function ResourceForm({
 function ProtocolsSection() {
   const state     = useMaestroStore((s) => s.state);
   const sessionId = useMaestroStore((s) => s.sessionId);
+  const sendMessage = useMaestroStore((s) => s.sendMessage);
 
-  const [protocols, setProtocols] = useState<ProtocolEntry[]>([]);
-  const [loading,   setLoading]   = useState(true);
-  const [showSave,  setShowSave]  = useState(false);
-  const [saveName,  setSaveName]  = useState("");
-  const [saveDesc,  setSaveDesc]  = useState("");
-  const [saveNotes, setSaveNotes] = useState("");
-  const [saving,    setSaving]    = useState(false);
+  const [protocols,   setProtocols]   = useState<ProtocolEntry[]>([]);
+  const [loading,     setLoading]     = useState(true);
+  const [showSave,    setShowSave]    = useState(false);
+  const [editingId,   setEditingId]   = useState<string | null>(null);
+  const [saveName,    setSaveName]    = useState("");
+  const [saveDesc,    setSaveDesc]    = useState("");
+  const [saveNotes,   setSaveNotes]   = useState("");
+  const [saving,      setSaving]      = useState(false);
+  const [expandedId,  setExpandedId]  = useState<string | null>(null);
 
-  useEffect(() => {
-    api.listProtocols().then((res) => {
+  const loadProtocols = useCallback(async () => {
+    try {
+      const res = await api.listProtocols();
       setProtocols(res.protocols);
+    } finally {
       setLoading(false);
-    });
+    }
   }, []);
+
+  useEffect(() => { loadProtocols(); }, [loadProtocols]);
 
   const handleSaveProtocol = async () => {
     if (!saveName.trim()) return;
@@ -1249,26 +1285,39 @@ function ProtocolsSection() {
         ? results.map((r) =>
             `${r.condition_label}=${r.condition_value}` +
             (r.optimiser_name ? ` [${r.optimiser_name}]` : "") +
-            `: best=${r.best_objective !== null ? r.best_objective.toFixed(4) : "N/A"}` +
-            `, n=${r.X.length}`
+            `: best=${r.best_objective !== null ? r.best_objective.toFixed(4) : "N/A"}, n=${r.X.length}`
           ).join("; ")
-        : "No results recorded";
+        : "";
 
-      const optimiserUsed = [
-        ...new Set(results.map((r) => r.optimiser_name || "").filter(Boolean)),
-      ].join(", ");
+      const optimiserUsed = [...new Set(
+        results.map((r) => r.optimiser_name || "").filter(Boolean)
+      )].join(", ");
 
-      const result = await api.saveProtocol({
-        name:              saveName,
-        description:       saveDesc,
-        notes:             saveNotes,
-        user_instructions: userInstructions,
-        workflow_plan:     workflowPlan as Record<string, unknown> | null,
-        results_summary:   resultsSummary,
-        optimiser_used:    optimiserUsed,
-      });
-      setProtocols((prev) => [...prev, result.protocol]);
+      if (editingId) {
+        // Update existing protocol
+        const result = await api.updateProtocol(editingId, {
+          name:        saveName,
+          description: saveDesc,
+          notes:       saveNotes,
+        });
+        setProtocols((prev) =>
+          prev.map((p) => p.protocol_id === editingId ? result.protocol : p)
+        );
+      } else {
+        // Create new protocol
+        const result = await api.saveProtocol({
+          name:              saveName,
+          description:       saveDesc,
+          notes:             saveNotes,
+          user_instructions: userInstructions,
+          workflow_plan:     workflowPlan as Record<string, unknown> | null,
+          results_summary:   resultsSummary,
+          optimiser_used:    optimiserUsed,
+        });
+        setProtocols((prev) => [result.protocol, ...prev]);
+      }
       setShowSave(false);
+      setEditingId(null);
       setSaveName(""); setSaveDesc(""); setSaveNotes("");
     } catch (e) {
       console.error(e);
@@ -1277,25 +1326,46 @@ function ProtocolsSection() {
     }
   };
 
+  const handleEdit = (p: ProtocolEntry) => {
+    setEditingId(p.protocol_id);
+    setSaveName(p.name);
+    setSaveDesc(p.description);
+    setSaveNotes(p.notes);
+    setShowSave(true);
+  };
+
   const handleDelete = async (protocolId: string) => {
     await api.deleteProtocol(protocolId);
     setProtocols((prev) => prev.filter((p) => p.protocol_id !== protocolId));
   };
 
-  const handleLoadToChat = (protocol: ProtocolEntry) => {
-    const prompt = [
+  const handleSaveNotes = async (protocolId: string, notes: string) => {
+    await api.updateProtocol(protocolId, { notes });
+    setProtocols((prev) =>
+      prev.map((p) => p.protocol_id === protocolId ? { ...p, notes } : p)
+    );
+  };
+
+  // Send protocol context directly into the chat as a user message
+  const handleLoadToChat = async (protocol: ProtocolEntry) => {
+    if (!sessionId) return;
+    const lines = [
       `[Replaying protocol: "${protocol.name}"]`,
-      ``,
-      `Previous instructions from this protocol:`,
+      "",
+      "Previous instructions from this protocol:",
       ...protocol.user_instructions.map((instr, i) => `${i + 1}. ${instr}`),
-      ``,
-      `Please replay this workflow. You may modify parameters, optimiser, or conditions as needed.`,
-    ].join("\n");
-    navigator.clipboard.writeText(prompt).then(() => {
-      alert(
-        `Protocol context copied to clipboard.\n\nPaste it into the chat on the Dashboard to replay or adapt this workflow.`
-      );
-    });
+    ];
+    if (protocol.results_summary) {
+      lines.push("", `Previous results: ${protocol.results_summary}`);
+    }
+    if (protocol.notes) {
+      lines.push("", `Notes: ${protocol.notes}`);
+    }
+    lines.push(
+      "",
+      "Please replay or adapt this workflow. You may modify parameters, optimiser, or conditions as needed.",
+    );
+    await sendMessage(lines.join("\n"));
   };
 
   const inputCls = cn(
@@ -1316,14 +1386,18 @@ function ProtocolsSection() {
 
       <p className="text-xs text-slate-500 mb-4">
         Save the current session as a reusable protocol — a reproducible record of the
-        instructions and workflow that MAESTRO executed. Another scientist can load a
-        protocol into the chat to replay or adapt the same experimental sequence.
+        instructions, workflow, and results. Protocols are stored in the database and
+        queryable by MAESTRO. Use <strong>Load to Chat</strong> to replay or adapt a
+        protocol directly in the conversation.
       </p>
 
-      {/* Save current session */}
       {sessionId && (
         <button
-          onClick={() => setShowSave(true)}
+          onClick={() => {
+            setEditingId(null);
+            setSaveName(""); setSaveDesc(""); setSaveNotes("");
+            setShowSave(true);
+          }}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors mb-4"
         >
           <Save size={12} /> Save current session as protocol
@@ -1332,7 +1406,9 @@ function ProtocolsSection() {
 
       {showSave && (
         <div className="glass-panel p-4 space-y-3 border-blue-200 border mb-4">
-          <h4 className="text-sm font-semibold text-slate-700">Save protocol</h4>
+          <h4 className="text-sm font-semibold text-slate-700">
+            {editingId ? "Edit protocol" : "Save protocol"}
+          </h4>
           <input
             className={inputCls}
             placeholder="Protocol name (e.g. GP-BO cathode optimisation — week 1)"
@@ -1341,17 +1417,22 @@ function ProtocolsSection() {
           />
           <input
             className={inputCls}
-            placeholder="Description (optional)"
+            placeholder="Short description (optional)"
             value={saveDesc}
             onChange={(e) => setSaveDesc(e.target.value)}
           />
           <textarea
             className={cn(inputCls, "resize-none")}
-            rows={2}
-            placeholder="Notes (e.g. conditions used, observations, suggested next steps)"
+            rows={3}
+            placeholder="Notes — observations, what worked, suggested next steps, parameter insights..."
             value={saveNotes}
             onChange={(e) => setSaveNotes(e.target.value)}
           />
+          {!editingId && (
+            <p className="text-[10px] text-slate-400">
+              The last 10 user instructions and current workflow plan will be captured automatically.
+            </p>
+          )}
           <div className="flex gap-2">
             <button
               onClick={handleSaveProtocol}
@@ -1359,10 +1440,10 @@ function ProtocolsSection() {
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors disabled:opacity-50"
             >
               {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-              {saving ? "Saving..." : "Save"}
+              {saving ? "Saving..." : editingId ? "Update" : "Save"}
             </button>
             <button
-              onClick={() => { setShowSave(false); setSaveName(""); setSaveDesc(""); setSaveNotes(""); }}
+              onClick={() => { setShowSave(false); setEditingId(null); setSaveName(""); setSaveDesc(""); setSaveNotes(""); }}
               className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs hover:bg-slate-50 transition-colors"
             >
               Cancel
@@ -1382,62 +1463,165 @@ function ProtocolsSection() {
       ) : (
         <div className="space-y-2">
           {protocols.map((p) => (
-            <div key={p.protocol_id} className="glass-panel px-4 py-3 space-y-2">
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-slate-700">{p.name}</div>
-                  {p.description && (
-                    <div className="text-xs text-slate-500 mt-0.5">{p.description}</div>
-                  )}
-                  <div className="text-[10px] text-slate-400 mt-1 space-y-0.5">
-                    {p.created_at && (
-                      <div>Saved: {new Date(p.created_at).toLocaleString()}</div>
-                    )}
-                    {p.optimiser_used && (
-                      <div>Optimiser: <span className="text-blue-600">{p.optimiser_used}</span></div>
-                    )}
-                    {p.results_summary && (
-                      <div className="text-green-600 font-medium">{p.results_summary}</div>
-                    )}
-                    {p.notes && (
-                      <div className="italic text-slate-400">{p.notes}</div>
-                    )}
-                  </div>
+            <ProtocolCard
+              key={p.protocol_id}
+              protocol={p}
+              expanded={expandedId === p.protocol_id}
+              onToggle={() => setExpandedId(expandedId === p.protocol_id ? null : p.protocol_id)}
+              onEdit={() => handleEdit(p)}
+              onDelete={() => handleDelete(p.protocol_id)}
+              onLoadToChat={() => handleLoadToChat(p)}
+              onSaveNotes={(notes) => handleSaveNotes(p.protocol_id, notes)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
-                  {p.user_instructions.length > 0 && (
-                    <details className="mt-2">
-                      <summary className="text-[10px] text-blue-600 cursor-pointer hover:underline">
-                        View {p.user_instructions.length} instruction(s)
-                      </summary>
-                      <div className="mt-1 space-y-0.5 pl-2 border-l border-slate-200">
-                        {p.user_instructions.map((instr, i) => (
-                          <div key={i} className="text-[10px] text-slate-500">
-                            {i + 1}. {instr}
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  )}
-                </div>
+function ProtocolCard({
+  protocol, expanded, onToggle, onEdit, onDelete, onLoadToChat, onSaveNotes,
+}: {
+  protocol:     ProtocolEntry;
+  expanded:     boolean;
+  onToggle:     () => void;
+  onEdit:       () => void;
+  onDelete:     () => void;
+  onLoadToChat: () => void;
+  onSaveNotes:  (notes: string) => void;
+}) {
+  const [editingNotes, setEditingNotes] = useState(false);
+  const [notesValue,   setNotesValue]   = useState(protocol.notes);
 
-                <div className="flex items-center gap-1 shrink-0">
+  const handleNotesSave = () => {
+    onSaveNotes(notesValue);
+    setEditingNotes(false);
+  };
+
+  return (
+    <div className="glass-panel overflow-hidden">
+      <div
+        className="flex items-start gap-3 px-4 py-3 cursor-pointer hover:bg-slate-50 transition-colors"
+        onClick={onToggle}
+      >
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold text-slate-700">{protocol.name}</span>
+            {protocol.optimiser_used && (
+              <span className="text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">
+                {protocol.optimiser_used}
+              </span>
+            )}
+          </div>
+          {protocol.description && (
+            <div className="text-xs text-slate-500 mt-0.5">{protocol.description}</div>
+          )}
+          <div className="text-[10px] text-slate-400 mt-1">
+            {protocol.created_at && new Date(protocol.created_at).toLocaleString()}
+          </div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          {expanded ? <ChevronDown size={14} className="text-slate-400" /> : <ChevronRight size={14} className="text-slate-400" />}
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="px-4 pb-4 space-y-3 border-t border-slate-100">
+
+          {/* Results summary */}
+          {protocol.results_summary && (
+            <div className="pt-3">
+              <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Results</div>
+              <div className="text-xs text-green-700 bg-green-50 rounded p-2 font-mono">
+                {protocol.results_summary}
+              </div>
+            </div>
+          )}
+
+          {/* Editable notes */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Notes</div>
+              {!editingNotes && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); setEditingNotes(true); }}
+                  className="text-[10px] text-blue-600 hover:underline"
+                >
+                  Edit
+                </button>
+              )}
+            </div>
+            {editingNotes ? (
+              <div className="space-y-2">
+                <textarea
+                  className="w-full rounded-md px-2 py-1.5 text-xs bg-white border border-slate-300 text-slate-800 focus:outline-none focus:border-blue-400 resize-none"
+                  rows={3}
+                  value={notesValue}
+                  onChange={(e) => setNotesValue(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  placeholder="Add observations, insights, or next steps..."
+                />
+                <div className="flex gap-2">
                   <button
-                    onClick={() => handleLoadToChat(p)}
-                    className="text-[10px] text-blue-600 hover:underline px-2 py-1 rounded hover:bg-blue-50 transition-colors"
-                    title="Copy protocol context to clipboard for chat replay"
+                    onClick={(e) => { e.stopPropagation(); handleNotesSave(); }}
+                    className="px-2 py-1 rounded bg-blue-600 text-white text-[10px] font-medium hover:bg-blue-500"
                   >
-                    Load ↗
+                    Save notes
                   </button>
                   <button
-                    onClick={() => handleDelete(p.protocol_id)}
-                    className="text-slate-400 hover:text-red-500 transition-colors p-1"
+                    onClick={(e) => { e.stopPropagation(); setEditingNotes(false); setNotesValue(protocol.notes); }}
+                    className="px-2 py-1 rounded border border-slate-300 text-slate-600 text-[10px] hover:bg-slate-50"
                   >
-                    <Trash2 size={12} />
+                    Cancel
                   </button>
                 </div>
               </div>
+            ) : (
+              <div className="text-xs text-slate-500 italic min-h-[1.5rem]">
+                {protocol.notes || <span className="text-slate-300">No notes yet. Click Edit to add.</span>}
+              </div>
+            )}
+          </div>
+
+          {/* User instructions */}
+          {protocol.user_instructions.length > 0 && (
+            <div>
+              <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                Captured instructions ({protocol.user_instructions.length})
+              </div>
+              <div className="space-y-1 pl-2 border-l-2 border-slate-200">
+                {protocol.user_instructions.map((instr, i) => (
+                  <div key={i} className="text-[10px] text-slate-500">
+                    <span className="text-slate-400 mr-1">{i + 1}.</span>{instr}
+                  </div>
+                ))}
+              </div>
             </div>
-          ))}
+          )}
+
+          {/* Actions */}
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={(e) => { e.stopPropagation(); onLoadToChat(); }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors"
+              title="Send this protocol's instructions directly into the chat"
+            >
+              ↗ Load to Chat
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onEdit(); }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs hover:bg-slate-50 transition-colors"
+            >
+              <Edit3 size={11} /> Edit
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              className="ml-auto text-slate-400 hover:text-red-500 transition-colors p-1"
+            >
+              <Trash2 size={12} />
+            </button>
+          </div>
         </div>
       )}
     </div>
