@@ -75,13 +75,6 @@ export interface Sample {
   tags:           string[];
 }
 
-export function getBestOutput(sample: Sample, outputName: string): number | null {
-  const values = sample.results
-    .filter((r) => outputName in r.outputs)
-    .map((r) => r.outputs[outputName]);
-  return values.length > 0 ? Math.max(...values) : null;
-}
-
 // ── Workflow Plan ─────────────────────────────────────────────────────────────
 
 export type StepStatus = "pending" | "running" | "completed" | "failed" | "skipped";

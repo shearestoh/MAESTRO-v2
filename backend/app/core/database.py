@@ -1,6 +1,3 @@
-"""
-Persistent store for experimental evaluations, resources, and protocols.
-"""
 from __future__ import annotations
 
 import json
@@ -46,10 +43,11 @@ DB_SCHEMA = (
 @contextmanager
 def _db_connection(read_only: bool = False):
     if read_only:
-        con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, check_same_thread=False)
+        con = sqlite3.connect(
+            f"file:{DB_PATH}?mode=ro", uri=True, check_same_thread=False, timeout=10
+        )
     else:
-        con = sqlite3.connect(DB_PATH, check_same_thread=False)
-    con.row_factory = sqlite3.Row  # ← enables dict-like access
+        con = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
     try:
         yield con
     finally:
@@ -58,6 +56,7 @@ def _db_connection(read_only: bool = False):
 
 def ensure_db() -> None:
     with _db_connection() as con:
+        con.execute("PRAGMA journal_mode=WAL")
         cur = con.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS evaluations (
@@ -98,7 +97,6 @@ def ensure_db() -> None:
 
 
 def reset_evaluations() -> None:
-    """Drop and recreate only the evaluations table. Called on session reset."""
     with _db_connection() as con:
         cur = con.cursor()
         cur.execute("DROP TABLE IF EXISTS evaluations")
@@ -145,14 +143,17 @@ def query_database(sql: str, max_rows: int = 100) -> dict:
             cur = con.execute(safe_sql)
             columns = [d[0] for d in cur.description] if cur.description else []
             rows    = cur.fetchall()
-        return {"status": "ok", "columns": columns, "rows": [list(r) for r in rows], "n_rows": len(rows)}
+        return {
+            "status":  "ok",
+            "columns": columns,
+            "rows":    [list(r) for r in rows],
+            "n_rows":  len(rows),
+        }
     except sqlite3.OperationalError as e:
         return {"status": "error", "message": f"Database error: {e}"}
     except Exception as e:
         return {"status": "error", "message": f"{type(e).__name__}: {e}"}
 
-
-# ── Resource CRUD ─────────────────────────────────────────────────────────────
 
 def get_all_resources() -> List[dict]:
     with _db_connection() as con:
@@ -204,8 +205,6 @@ def update_resource_stock(resource_id: str, new_stock: float) -> None:
         )
         con.commit()
 
-
-# ── Protocol CRUD ─────────────────────────────────────────────────────────────
 
 def get_all_protocols() -> List[dict]:
     with _db_connection() as con:
@@ -264,16 +263,16 @@ def update_protocol_notes(protocol_id: str, notes: str) -> None:
         )
         con.commit()
 
-_PROTOCOL_FIELD_COLS = {"notes", "name", "description", "results_summary"}
+
+_PROTOCOL_UPDATABLE_FIELDS = {"notes", "name", "description", "results_summary"}
+
 
 def update_protocol_field(protocol_id: str, field: str, value: str) -> bool:
-    if field not in _PROTOCOL_FIELD_COLS:
+    if field not in _PROTOCOL_UPDATABLE_FIELDS:
         return False
-    col_map = {f: f for f in _PROTOCOL_FIELD_COLS}
-    col = col_map[field]
     with _db_connection() as con:
         cur = con.execute(
-            f"UPDATE protocols SET {col} = ? WHERE protocol_id = ?", 
+            f"UPDATE protocols SET {field} = ? WHERE protocol_id = ?",
             (value, protocol_id),
         )
         con.commit()

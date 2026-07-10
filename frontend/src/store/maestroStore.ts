@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type {
   SessionState, WsEvent, WorkflowPlan,
-  LabSettings, OptimisationLibraryEntry,
+  LabSettings, OptimisationLibraryEntry, VirtualInstrument,
 } from "@/types";
 import { api } from "@/lib/api";
 
@@ -16,6 +16,7 @@ interface MaestroStore {
   sidebarOpen:         boolean;
   labSettings:         LabSettings | null;
   optimisationLibrary: OptimisationLibraryEntry[];
+  instruments:         VirtualInstrument[];
 
   initSession:             () => Promise<void>;
   refreshState:            () => Promise<void>;
@@ -31,6 +32,7 @@ interface MaestroStore {
   saveLabSettings:         (updates: Partial<LabSettings>) => Promise<void>;
   loadOptimisationLibrary: () => Promise<void>;
   updateOptimiser:         (name: string, nCalls: number, nInitPts: number) => Promise<void>;
+  loadInstruments:         () => Promise<void>;
 }
 
 export const useMaestroStore = create<MaestroStore>((set, get) => ({
@@ -44,6 +46,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
   sidebarOpen:         true,
   labSettings:         null,
   optimisationLibrary: [],
+  instruments:         [],
 
   initSession: async () => {
     set({ isLoading: true, error: null });
@@ -125,14 +128,13 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     }
   },
 
-  // Properly resets the existing session on the backend, then creates a new one.
   reset: async () => {
     const { sessionId } = get();
     if (sessionId) {
       try {
         await api.reset(sessionId);
       } catch {
-        // If the session no longer exists on the backend, continue with local reset.
+        // Session may no longer exist on backend; continue with local reset
       }
     }
     localStorage.removeItem("maestro_session_id");
@@ -192,6 +194,15 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     try {
       const res = await api.updateSessionOptimiser(sessionId, name, nCalls, nInitPts);
       set({ state: res.state });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  loadInstruments: async () => {
+    try {
+      const res = await api.listTools();
+      set({ instruments: res.tools });
     } catch (e) {
       set({ error: String(e) });
     }

@@ -595,23 +595,24 @@ def save_protocol(data: dict):
 
 @router.put("/protocols/{protocol_id}")
 def update_protocol(protocol_id: str, updates: dict):
+    protocols = get_all_protocols()
+    existing  = next((p for p in protocols if p["protocol_id"] == protocol_id), None)
+    if not existing:
+        raise HTTPException(404, f"Protocol {protocol_id} not found")
+
     single_field_updates = {"notes", "name", "description", "results_summary"}
     if len(updates) == 1 and next(iter(updates)) in single_field_updates:
         field = next(iter(updates))
         from app.core.database import update_protocol_field
         update_protocol_field(protocol_id, field, updates[field])
     else:
-        protocols = get_all_protocols()
-        existing  = next((p for p in protocols if p["protocol_id"] == protocol_id), None)
-        if not existing:
-            raise HTTPException(404, f"Protocol {protocol_id} not found")
         existing.update(updates)
         upsert_protocol(existing)
 
     protocols = get_all_protocols()
     updated   = next((p for p in protocols if p["protocol_id"] == protocol_id), None)
     if not updated:
-        raise HTTPException(404, f"Protocol {protocol_id} not found")
+        raise HTTPException(404, f"Protocol {protocol_id} not found after update")
     return {"status": "ok", "protocol": updated}
 
 

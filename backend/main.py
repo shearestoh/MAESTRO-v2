@@ -1,5 +1,6 @@
-from contextlib import asynccontextmanager
+import threading
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,21 +22,26 @@ async def lifespan(app: FastAPI):
     try:
         import mineru  # noqa: F401
         print("[INFO] MinerU available — document parsing enabled")
-        # Load library documents in background to avoid blocking startup
-        import asyncio
-        asyncio.get_event_loop().run_in_executor(None, load_library_documents_into_store)
+        if settings.document_library:
+            threading.Thread(
+                target=load_library_documents_into_store,
+                daemon=True,
+                name="maestro-lib-loader",
+            ).start()
     except ImportError:
-        print(
-            "[WARN] MinerU not installed — document upload/parsing disabled. "
-            "Install with: pip install mineru[core]"
-        )
+        if settings.document_library:
+            print("[WARN] MinerU not installed — library documents will not be pre-loaded. Install with: pip install mineru[core]")
+        else:
+            print("[WARN] MinerU not installed — document upload disabled. Install with: pip install mineru[core]")
 
     yield
 
 
 _CORS_ORIGINS = [
     o.strip()
-    for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    for o in os.getenv(
+        "CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+    ).split(",")
     if o.strip()
 ]
 

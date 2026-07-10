@@ -13,7 +13,7 @@ import type {
   LabResource, ProtocolEntry,
 } from "@/types";
 
-type Tab = "instruments" | "optimisation" | "library" | "resources" | "settings";
+type Tab = "instruments" | "optimisation" | "library" | "protocols" | "resources" | "settings";
 
 export function LabSetup() {
   const [tab, setTab] = useState<Tab>("instruments");
@@ -22,6 +22,7 @@ export function LabSetup() {
     { id: "instruments",  label: "Instruments"  },
     { id: "optimisation", label: "Optimisation" },
     { id: "library",      label: "Library"      },
+    { id: "protocols",    label: "Protocols"    },
     { id: "resources",    label: "Resources"    },
     { id: "settings",     label: "Settings"     },
   ];
@@ -56,6 +57,7 @@ export function LabSetup() {
         {tab === "instruments"  && <InstrumentsTab />}
         {tab === "optimisation" && <OptimisationTab />}
         {tab === "library"      && <LibraryTab />}
+        {tab === "protocols"    && <ProtocolsSection />}
         {tab === "resources"    && <ResourcesTab />}
         {tab === "settings"     && <SettingsTab />}
       </div>
@@ -144,6 +146,7 @@ function InstrumentsTab() {
           initial={editTarget}
           onSaved={handleSaved}
           onCancel={() => { setShowForm(false); setEditTarget(null); }}
+          existingInstruments={instruments}
         />
       )}
     </div>
@@ -197,11 +200,11 @@ function InstrumentRow({
   onDelete:   () => void;
 }) {
   const subCatIcon: Record<string, string> = {
-    synthesis:       "🧪",
-    characterisation:"⚡",
-    simulation:      "💻",
-    modelling:       "🧮",
-    data:            "💾",
+    synthesis:        "🧪",
+    characterisation: "⚡",
+    simulation:       "💻",
+    modelling:        "🧮",
+    data:             "💾",
   };
 
   return (
@@ -245,11 +248,12 @@ interface ParamDef  { name: string; min: string; max: string; unit: string; desc
 interface OutputDef { name: string; unit: string; description: string; }
 
 function InstrumentForm({
-  initial, onSaved, onCancel,
+  initial, onSaved, onCancel, existingInstruments,
 }: {
-  initial:  VirtualInstrument | null;
-  onSaved:  (inst: VirtualInstrument) => void;
-  onCancel: () => void;
+  initial:             VirtualInstrument | null;
+  onSaved:             (inst: VirtualInstrument) => void;
+  onCancel:            () => void;
+  existingInstruments: VirtualInstrument[];
 }) {
   const [name,        setName]        = useState(initial?.name        ?? "");
   const [category,    setCategory]    = useState(initial?.category    ?? "physical");
@@ -286,6 +290,16 @@ function InstrumentForm({
     setOutputs((o) => o.map((x, j) => j === i ? { ...x, [field]: val } : x));
 
   const handleSave = async () => {
+    if (!name.trim()) return;
+    if (!initial) {
+      const duplicate = existingInstruments.find(
+        (i) => i.name.toLowerCase() === name.trim().toLowerCase()
+      );
+      if (duplicate) {
+        alert(`An instrument named "${name.trim()}" already exists.`);
+        return;
+      }
+    }
     setSaving(true);
     const payload = {
       name,
@@ -293,7 +307,7 @@ function InstrumentForm({
       category,
       sub_category: subCategory,
       description,
-      time_cost_s: parseFloat(timeCostS) || 0,
+      time_cost_s:  parseFloat(timeCostS) || 0,
       parameters: params.map((p) => ({
         name: p.name, type: "continuous",
         min: parseFloat(p.min) || null,
@@ -304,7 +318,7 @@ function InstrumentForm({
         name: o.name, type: "scalar", unit: o.unit, description: o.description,
       })),
       failure_modes: failRate && parseFloat(failRate) > 0 ? [{
-        name: "failure",
+        name:        "failure",
         description: failDesc || "Instrument failure",
         probability: parseFloat(failRate) / 100,
       }] : [],
@@ -313,12 +327,9 @@ function InstrumentForm({
       metadata:   {},
     };
     try {
-      let result;
-      if (initial) {
-        result = await api.updateTool(initial.tool_id, payload);
-      } else {
-        result = await api.registerTool(payload);
-      }
+      const result = initial
+        ? await api.updateTool(initial.tool_id, payload)
+        : await api.registerTool(payload);
       onSaved(result.tool);
     } catch (e) {
       console.error(e);
@@ -342,7 +353,12 @@ function InstrumentForm({
       <div className="grid grid-cols-3 gap-3">
         <div>
           <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">Name</label>
-          <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Potentiostat" />
+          <input
+            className={inputCls}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Potentiostat"
+          />
         </div>
         <div>
           <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">Category</label>
@@ -633,8 +649,6 @@ function LibraryTab() {
     if (!file || !sessionId) return;
     setUploading(true);
     try {
-      // Upload runs to completion even if user navigates away —
-      // we don't await navigation, just the fetch itself.
       await api.uploadDocument(sessionId, file, docType);
       const res = await api.listLibrary();
       setLibrary(res.documents);
@@ -664,7 +678,6 @@ function LibraryTab() {
           made available to MAESTRO across all sessions. Select the document type before uploading.
         </p>
 
-        {/* Doc type selector */}
         <div className="flex gap-2">
           {(["paper", "manual"] as const).map((type) => (
             <button
@@ -720,8 +733,6 @@ function LibraryTab() {
         onRemove={handleRemove}
         emptyMessage="No manuals uploaded. Upload instrument manuals so MAESTRO can enforce operating limits and safety constraints."
       />
-
-      <ProtocolsSection />
     </div>
   );
 }
@@ -888,10 +899,10 @@ function SettingsTab() {
   );
 }
 
-
 // ── Resources Tab ─────────────────────────────────────────────────────────────
 
 function ResourcesTab() {
+  const instruments = useMaestroStore((s) => s.instruments);
   const [resources, setResources] = useState<LabResource[]>([]);
   const [loading,   setLoading]   = useState(true);
   const [showForm,  setShowForm]  = useState(false);
@@ -991,7 +1002,6 @@ function ResourcesTab() {
                     </button>
                   </div>
 
-                  {/* Stock level */}
                   <div className="flex items-center gap-3">
                     <div className="flex-1">
                       <div className="flex justify-between text-[10px] text-slate-500 mb-1">
@@ -1015,7 +1025,6 @@ function ResourcesTab() {
                         </div>
                       )}
                     </div>
-                    {/* Quick stock adjustment */}
                     <div className="flex items-center gap-1 shrink-0">
                       <button
                         onClick={() => handleStockUpdate(r.resource_id, -1)}
@@ -1030,7 +1039,6 @@ function ResourcesTab() {
                     </div>
                   </div>
 
-                  {/* Consumption rules */}
                   {r.consumption_rules.length > 0 && (
                     <div className="space-y-1">
                       <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
@@ -1056,6 +1064,7 @@ function ResourcesTab() {
           <ResourceForm
             onSaved={handleSaved}
             onCancel={() => setShowForm(false)}
+            instruments={instruments}
           />
         )}
       </div>
@@ -1066,9 +1075,11 @@ function ResourcesTab() {
 function ResourceForm({
   onSaved,
   onCancel,
+  instruments,
 }: {
-  onSaved:  (r: LabResource) => void;
-  onCancel: () => void;
+  onSaved:     (r: LabResource) => void;
+  onCancel:    () => void;
+  instruments: VirtualInstrument[];
 }) {
   const [name,        setName]        = useState("");
   const [unit,        setUnit]        = useState("");
@@ -1194,12 +1205,18 @@ function ResourceForm({
         </p>
         {rules.map((rule, i) => (
           <div key={i} className="grid grid-cols-3 gap-1.5 mb-1.5">
-            <input
+            <select
               className={inputCls}
-              placeholder="Instrument name"
               value={rule.instrument_name}
               onChange={(e) => updateRule(i, "instrument_name", e.target.value)}
-            />
+            >
+              <option value="">Select instrument...</option>
+              {instruments
+                .filter((inst) => inst.category === "physical")
+                .map((inst) => (
+                  <option key={inst.tool_id} value={inst.name}>{inst.name}</option>
+                ))}
+            </select>
             <input
               className={inputCls}
               placeholder={`Amount per use (${unit || "units"})`}
@@ -1238,23 +1255,22 @@ function ResourceForm({
   );
 }
 
-
-// ── Protocols Section ────────────────────────────────────
+// ── Protocols Tab ─────────────────────────────────────────────────────────────
 
 function ProtocolsSection() {
-  const state     = useMaestroStore((s) => s.state);
-  const sessionId = useMaestroStore((s) => s.sessionId);
+  const state       = useMaestroStore((s) => s.state);
+  const sessionId   = useMaestroStore((s) => s.sessionId);
   const sendMessage = useMaestroStore((s) => s.sendMessage);
 
-  const [protocols,   setProtocols]   = useState<ProtocolEntry[]>([]);
-  const [loading,     setLoading]     = useState(true);
-  const [showSave,    setShowSave]    = useState(false);
-  const [editingId,   setEditingId]   = useState<string | null>(null);
-  const [saveName,    setSaveName]    = useState("");
-  const [saveDesc,    setSaveDesc]    = useState("");
-  const [saveNotes,   setSaveNotes]   = useState("");
-  const [saving,      setSaving]      = useState(false);
-  const [expandedId,  setExpandedId]  = useState<string | null>(null);
+  const [protocols,  setProtocols]  = useState<ProtocolEntry[]>([]);
+  const [loading,    setLoading]    = useState(true);
+  const [showSave,   setShowSave]   = useState(false);
+  const [editingId,  setEditingId]  = useState<string | null>(null);
+  const [saveName,   setSaveName]   = useState("");
+  const [saveDesc,   setSaveDesc]   = useState("");
+  const [saveNotes,  setSaveNotes]  = useState("");
+  const [saving,     setSaving]     = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const loadProtocols = useCallback(async () => {
     try {
@@ -1280,7 +1296,7 @@ function ProtocolsSection() {
         ? { steps: state.background_job_plan, summary: "Captured workflow" }
         : null;
 
-      const results = state?.results_store ?? [];
+      const results        = state?.results_store ?? [];
       const resultsSummary = results.length > 0
         ? results.map((r) =>
             `${r.condition_label}=${r.condition_value}` +
@@ -1294,7 +1310,6 @@ function ProtocolsSection() {
       )].join(", ");
 
       if (editingId) {
-        // Update existing protocol
         const result = await api.updateProtocol(editingId, {
           name:        saveName,
           description: saveDesc,
@@ -1304,7 +1319,6 @@ function ProtocolsSection() {
           prev.map((p) => p.protocol_id === editingId ? result.protocol : p)
         );
       } else {
-        // Create new protocol
         const result = await api.saveProtocol({
           name:              saveName,
           description:       saveDesc,
@@ -1346,7 +1360,6 @@ function ProtocolsSection() {
     );
   };
 
-  // Send protocol context directly into the chat as a user message
   const handleLoadToChat = async (protocol: ProtocolEntry) => {
     if (!sessionId) return;
     const lines = [
@@ -1375,21 +1388,16 @@ function ProtocolsSection() {
   );
 
   return (
-    <div className="mt-8 border-t border-slate-100 pt-6">
-      <div className="flex items-center gap-2 mb-3">
-        <span>📋</span>
-        <h3 className="text-sm font-semibold text-slate-700">Protocols</h3>
-        <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
-          {protocols.length}
-        </span>
+    <div className="space-y-4 max-w-3xl">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700 mb-1">Protocols</h3>
+        <p className="text-xs text-slate-500">
+          Save the current session as a reusable protocol — a reproducible record of the
+          instructions, workflow, and results. Protocols are stored in the database and
+          queryable by MAESTRO. Use <strong>Load to Chat</strong> to replay or adapt a
+          protocol directly in the conversation.
+        </p>
       </div>
-
-      <p className="text-xs text-slate-500 mb-4">
-        Save the current session as a reusable protocol — a reproducible record of the
-        instructions, workflow, and results. Protocols are stored in the database and
-        queryable by MAESTRO. Use <strong>Load to Chat</strong> to replay or adapt a
-        protocol directly in the conversation.
-      </p>
 
       {sessionId && (
         <button
@@ -1398,14 +1406,14 @@ function ProtocolsSection() {
             setSaveName(""); setSaveDesc(""); setSaveNotes("");
             setShowSave(true);
           }}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors mb-4"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors"
         >
           <Save size={12} /> Save current session as protocol
         </button>
       )}
 
       {showSave && (
-        <div className="glass-panel p-4 space-y-3 border-blue-200 border mb-4">
+        <div className="glass-panel p-4 space-y-3 border-blue-200 border">
           <h4 className="text-sm font-semibold text-slate-700">
             {editingId ? "Edit protocol" : "Save protocol"}
           </h4>
@@ -1443,7 +1451,10 @@ function ProtocolsSection() {
               {saving ? "Saving..." : editingId ? "Update" : "Save"}
             </button>
             <button
-              onClick={() => { setShowSave(false); setEditingId(null); setSaveName(""); setSaveDesc(""); setSaveNotes(""); }}
+              onClick={() => {
+                setShowSave(false); setEditingId(null);
+                setSaveName(""); setSaveDesc(""); setSaveNotes("");
+              }}
               className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs hover:bg-slate-50 transition-colors"
             >
               Cancel
@@ -1522,14 +1533,14 @@ function ProtocolCard({
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          {expanded ? <ChevronDown size={14} className="text-slate-400" /> : <ChevronRight size={14} className="text-slate-400" />}
+          {expanded
+            ? <ChevronDown size={14} className="text-slate-400" />
+            : <ChevronRight size={14} className="text-slate-400" />}
         </div>
       </div>
 
       {expanded && (
         <div className="px-4 pb-4 space-y-3 border-t border-slate-100">
-
-          {/* Results summary */}
           {protocol.results_summary && (
             <div className="pt-3">
               <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Results</div>
@@ -1539,7 +1550,6 @@ function ProtocolCard({
             </div>
           )}
 
-          {/* Editable notes */}
           <div>
             <div className="flex items-center justify-between mb-1">
               <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Notes</div>
@@ -1584,7 +1594,6 @@ function ProtocolCard({
             )}
           </div>
 
-          {/* User instructions */}
           {protocol.user_instructions.length > 0 && (
             <div>
               <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
@@ -1600,12 +1609,10 @@ function ProtocolCard({
             </div>
           )}
 
-          {/* Actions */}
           <div className="flex items-center gap-2 pt-1">
             <button
               onClick={(e) => { e.stopPropagation(); onLoadToChat(); }}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors"
-              title="Send this protocol's instructions directly into the chat"
             >
               ↗ Load to Chat
             </button>

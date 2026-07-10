@@ -1,6 +1,3 @@
-"""
-Lab configuration management — persisted to lab_config.json.
-"""
 from __future__ import annotations
 
 import json
@@ -183,42 +180,50 @@ def get_document_library() -> list[DocumentLibraryEntry]:
     return get_lab_settings().document_library
 
 
-_mineru_warned = False
+_mineru_load_warned = False
+
 
 def load_library_documents_into_store() -> None:
-    global _mineru_warned
+    global _mineru_load_warned
     from app.core.documents import DOCUMENTS, create_document
+
     library = get_document_library()
     if not library:
         return
+
     loaded = 0
     for entry in library:
         if entry.document_id in DOCUMENTS:
             continue
         file_path = Path(entry.file_path)
         if not file_path.exists():
-            print(f"[WARN] Library document not found: {entry.filename}")
+            print(f"[WARN] Library document not found on disk: {entry.filename}")
             continue
         try:
-            doc = create_document(entry.filename, file_path.read_bytes(), document_id=entry.document_id)
+            doc = create_document(
+                entry.filename,
+                file_path.read_bytes(),
+                document_id=entry.document_id,
+            )
             if doc.document_id != entry.document_id:
                 DOCUMENTS.pop(doc.document_id, None)
                 doc.document_id = entry.document_id
                 DOCUMENTS[entry.document_id] = doc
             loaded += 1
         except RuntimeError as e:
-            if "MinerU" in str(e) and not _mineru_warned:
+            if "MinerU" in str(e) and not _mineru_load_warned:
                 print("[WARN] MinerU not installed — skipping document pre-loading. Install with: pip install mineru[core]")
-                _mineru_warned = True
+                _mineru_load_warned = True
         except Exception as e:
-            print(f"[WARN] Could not reload {entry.filename}: {e}")
+            print(f"[WARN] Could not reload library document {entry.filename}: {e}")
+
     if loaded:
-        print(f"[INFO] Loaded {loaded} document(s) from library")
+        print(f"[INFO] Loaded {loaded} document(s) from library into memory")
+
     _migrate_resources_and_protocols()
 
 
 def _migrate_resources_and_protocols() -> None:
-    """One-time migration of resources/protocols from lab_config.json to SQLite."""
     from app.core.database import (
         get_all_protocols, get_all_resources,
         upsert_protocol, upsert_resource,

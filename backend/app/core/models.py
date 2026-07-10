@@ -7,7 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 def append_assistant_message(messages: list, content: str, tool_calls: list | None = None) -> dict:
-    """Append a well-formed assistant message. Returns the appended entry."""
     entry: dict = {"role": "assistant", "content": content or ""}
     if tool_calls:
         entry["tool_calls"] = tool_calls
@@ -16,11 +15,6 @@ def append_assistant_message(messages: list, content: str, tool_calls: list | No
 
 
 def append_tool_response(messages: list, tool_call_id: str, name: str, content: str) -> bool:
-    """
-    Append a tool response only if there is a preceding assistant message
-    with a matching tool_call_id. Returns True if appended, False if skipped.
-    """
-    # Find the most recent assistant message with tool_calls
     for msg in reversed(messages):
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             ids = {tc.get("id") for tc in msg["tool_calls"]}
@@ -32,17 +26,12 @@ def append_tool_response(messages: list, tool_call_id: str, name: str, content: 
                     "content":      content,
                 })
                 return True
-        # Stop searching if we hit a tool message for a different call
         if msg.get("role") == "tool":
             continue
     return False
 
 
 def get_unanswered_tool_calls(messages: list) -> list[dict]:
-    """
-    Return tool calls from assistant messages that have no corresponding tool response.
-    Used to detect and repair broken chains.
-    """
     responded: set[str] = {
         msg["tool_call_id"]
         for msg in messages
@@ -55,6 +44,7 @@ def get_unanswered_tool_calls(messages: list) -> list[dict]:
                 if tc.get("id") and tc["id"] not in responded:
                     unanswered.append(tc)
     return unanswered
+
 
 # ── Document structure ────────────────────────────────────────────────────────
 
@@ -161,7 +151,6 @@ class ProtocolEntry(BaseModel):
 
 
 # ── Lab Settings ──────────────────────────────────────────────────────────────
-# NOTE: LabResource and ProtocolEntry must be defined before LabSettings.
 
 class LabSettings(BaseModel):
     lab_name:                str = "My Lab"
@@ -222,6 +211,9 @@ def generate_sample_id(session: "SessionModel") -> str:
 
 # ── Workflow Plan ─────────────────────────────────────────────────────────────
 
+WorkflowSource = Literal["agent", "paper", "user"]
+
+
 class WorkflowStep(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -262,7 +254,7 @@ class WorkflowPlan(BaseModel):
     plan_id:    str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
     summary:    str
     steps:      List[WorkflowStep]
-    source:     str = "agent"
+    source:     WorkflowSource = "agent"
     created_at: str = ""
 
 

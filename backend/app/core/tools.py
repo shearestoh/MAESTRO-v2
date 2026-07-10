@@ -190,7 +190,7 @@ def _now() -> str:
 # ── Projected Schedule ────────────────────────────────────────────────────────
 
 def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]:
-    from app.core.tool_registry import INSTRUMENT_REGISTRY
+    from app.core.tool_registry import TOOL_REGISTRY
     from datetime import datetime as dt, timedelta, timezone
 
     now = dt.now(timezone.utc)
@@ -202,19 +202,19 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
         """Get time cost for a step, using registry lookup for synthesise/characterise."""
         instrument_nm = step.get("instrument", "") or resolved_instrument
         if instrument_nm:
-            cost = INSTRUMENT_REGISTRY.get_time_cost(instrument_nm, default=-1)
+            cost = TOOL_REGISTRY.get_time_cost(instrument_nm, default=-1)
             if cost >= 0:
                 return cost
         kind = step.get("kind", "")
         if kind == "synthesise":
-            synth_list = INSTRUMENT_REGISTRY.list_by_sub_category("synthesis")
+            synth_list = TOOL_REGISTRY.list_by_sub_category("synthesis")
             if synth_list:
-                return INSTRUMENT_REGISTRY.get_time_cost(synth_list[0].name, default=5.0)
+                return TOOL_REGISTRY.get_time_cost(synth_list[0].name, default=5.0)
             return 5.0
         if kind == "characterise":
-            char_list = INSTRUMENT_REGISTRY.list_by_sub_category("characterisation")
+            char_list = TOOL_REGISTRY.list_by_sub_category("characterisation")
             if char_list:
-                return INSTRUMENT_REGISTRY.get_time_cost(char_list[0].name, default=8.0)
+                return TOOL_REGISTRY.get_time_cost(char_list[0].name, default=8.0)
             return 8.0
         return 0.0
 
@@ -235,12 +235,12 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
         if kind == "optimise_condition":
             n_calls = int(step.get("n_calls") or 10)
 
-            synth_instruments = INSTRUMENT_REGISTRY.list_by_sub_category("synthesis")
-            char_instruments  = INSTRUMENT_REGISTRY.list_by_sub_category("characterisation")
+            synth_instruments = TOOL_REGISTRY.list_by_sub_category("synthesis")
+            char_instruments  = TOOL_REGISTRY.list_by_sub_category("characterisation")
             synth_name = synth_instruments[0].name if synth_instruments else "Synthesiser"
             char_name  = char_instruments[0].name  if char_instruments  else "Characteriser"
-            synth_time = INSTRUMENT_REGISTRY.get_time_cost(synth_name, default=5.0)
-            char_time  = INSTRUMENT_REGISTRY.get_time_cost(char_name,  default=8.0)
+            synth_time = TOOL_REGISTRY.get_time_cost(synth_name, default=5.0)
+            char_time  = TOOL_REGISTRY.get_time_cost(char_name,  default=8.0)
 
             label_base = step.get("label", "Optimisation")
             cursor     = max(dep_end, instrument_free.get("optimiser", now), now)
@@ -286,10 +286,10 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
 
             if not explicit_instrument:
                 if kind == "synthesise":
-                    synth_list = INSTRUMENT_REGISTRY.list_by_sub_category("synthesis")
+                    synth_list = TOOL_REGISTRY.list_by_sub_category("synthesis")
                     explicit_instrument = synth_list[0].name if synth_list else ""
                 elif kind == "characterise":
-                    char_list = INSTRUMENT_REGISTRY.list_by_sub_category("characterisation")
+                    char_list = TOOL_REGISTRY.list_by_sub_category("characterisation")
                     explicit_instrument = char_list[0].name if char_list else ""
 
             raw_instrument_id = (
@@ -354,18 +354,40 @@ print(f"SAVED:{out_file}")
 """).strip()
 
 
+import re as _re
+
+def _sanitise_plot_code(code: str) -> str:
+    """
+    Remove calls that conflict with the script footer:
+    plt.savefig, plt.show, plt.close, plt.tight_layout.
+    These are injected by the footer to ensure consistent output.
+    """
+    lines = []
+    for line in code.splitlines():
+        stripped = line.strip()
+        if _re.match(
+            r'plt\.(savefig|show|close|tight_layout)\s*\(',
+            stripped,
+        ):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def generate_plot(session, plot_code: str, out_file: Optional[str] = None) -> str:
     if out_file is None:
         tmp = tempfile.NamedTemporaryFile(suffix=".png", prefix="maestro_plot_", delete=False)
         out_file = tmp.name
         tmp.close()
 
+    sanitised_code = _sanitise_plot_code(plot_code)
+
     data_payload = {
         "results_store":   session.agent_state.results_store,
         "sample_registry": [s.model_dump() for s in session.sample_registry],
     }
 
-    full_script = f"{_PLOT_PREAMBLE}\n\n{plot_code}\n\n{_PLOT_FOOTER}"
+    full_script = f"{_PLOT_PREAMBLE}\n\n{sanitised_code}\n\n{_PLOT_FOOTER}"
     script_file = tempfile.NamedTemporaryFile(
         suffix=".py", prefix="maestro_plot_script_",
         delete=False, mode="w", encoding="utf-8",

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, memo } from "react";
 import { useMaestroStore } from "@/store/maestroStore";
 import { cn } from "@/lib/utils";
 import {
@@ -17,12 +17,30 @@ export function AgentChat() {
   const confirm     = useMaestroStore((s) => s.confirm);
   const executePlan = useMaestroStore((s) => s.executePlan);
 
-  const [input, setInput] = useState("");
+  const [input,             setInput]             = useState("");
+  const [optimisticMessage, setOptimisticMessage] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  const messages: Message[] = (state?.messages ?? []).filter(
+  const canonicalMessages: Message[] = (state?.messages ?? []).filter(
     (m) => m.role !== "system" && m.role !== "tool"
   );
+
+  // Once the backend echoes the message back, clear the optimistic copy
+  useEffect(() => {
+    if (optimisticMessage && canonicalMessages.some(
+      (m) => m.role === "user" && m.content === optimisticMessage
+    )) {
+      setOptimisticMessage(null);
+    }
+  }, [canonicalMessages, optimisticMessage]);
+
+  // Combine: canonical messages + optimistic tail (if not yet echoed)
+  const messages: Message[] = optimisticMessage
+    ? [...canonicalMessages, { role: "user" as const, content: optimisticMessage }]
+    : canonicalMessages;
+
+  const bgActive = state?.background_job_active ?? false;
+  const canSend  = !!input.trim() && !isLoading && !bgActive;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -30,8 +48,9 @@ export function AgentChat() {
 
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || isLoading) return;
+    if (!text || isLoading || bgActive) return;
     setInput("");
+    setOptimisticMessage(text);
     await sendMessage(text);
   };
 
@@ -55,7 +74,7 @@ export function AgentChat() {
           <MessageBubble key={i} message={msg} />
         ))}
 
-        {state?.background_job_active && state.current_activity && (
+        {bgActive && state?.current_activity && (
           <div className="flex items-start gap-3 animate-fade-in">
             <AgentAvatar />
             <div className="glass-panel px-4 py-3 max-w-[85%]">
@@ -112,7 +131,7 @@ export function AgentChat() {
           />
           <button
             onClick={handleSend}
-            disabled={!input.trim() || isLoading}
+            disabled={!canSend}
             className={cn(
               "px-4 py-2 rounded-lg bg-blue-600 text-white font-medium text-sm",
               "hover:bg-blue-500 transition-colors",
@@ -149,7 +168,7 @@ function UserAvatar() {
   );
 }
 
-function MessageBubble({ message }: { message: Message }) {
+const MessageBubble = memo(function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user";
 
   if (!isUser && !message.content?.trim()) {
@@ -214,7 +233,7 @@ function MessageBubble({ message }: { message: Message }) {
       </div>
     </div>
   );
-}
+});
 
 function WorkflowPlanEditor({
   plan,
@@ -226,7 +245,7 @@ function WorkflowPlanEditor({
   onAbort:   () => void;
 }) {
   const [editedPlan, setEditedPlan] = useState<WorkflowPlan>(
-    JSON.parse(JSON.stringify(plan))
+    () => structuredClone(plan)
   );
   const [expandedSteps, setExpandedSteps] = useState<Set<string>>(
     new Set(plan.steps.map((s) => s.step_id))
@@ -286,7 +305,7 @@ function WorkflowPlanEditor({
       if (n.includes("optuna"))   return "🔀";
       if (n.includes("deap"))     return "🧬";
       if (n.includes("honegumi") || n.includes("ax")) return "🧬";
-      return "📈"; // default GP-BO
+      return "📈";
     }
     const icons: Record<string, string> = {
       synthesise:    "🧪",
@@ -312,9 +331,9 @@ function WorkflowPlanEditor({
       return "Optimisation";
     }
     const labels: Record<string, string> = {
-      synthesise:   "Synthesise",
-      characterise: "Characterise",
-      list_samples: "List Samples",
+      synthesise:     "Synthesise",
+      characterise:   "Characterise",
+      list_samples:   "List Samples",
       query_database: "Query Database",
       generate_plot:  "Generate Plot",
       analyse_data:   "Analyse Data",
@@ -333,8 +352,7 @@ function WorkflowPlanEditor({
     (s) =>
       s.kind === "optimise_condition" &&
       (
-        !s.condition_label ||
-        s.condition_label === "condition" ||
+        !s.condition_label?.trim() ||
         s.condition_value === undefined ||
         s.condition_value === null ||
         (s.free_params ?? []).length === 0
@@ -392,7 +410,6 @@ function WorkflowPlanEditor({
             {expandedSteps.has(step.step_id) && (
               <div className="px-3 py-3 space-y-3 bg-white">
 
-                {/* Synthesise step */}
                 {step.kind === "synthesise" && step.params && (
                   <div className="space-y-2">
                     <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
@@ -413,7 +430,6 @@ function WorkflowPlanEditor({
                   </div>
                 )}
 
-                {/* Characterise step */}
                 {step.kind === "characterise" && (
                   <div className="space-y-2">
                     <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
@@ -446,7 +462,6 @@ function WorkflowPlanEditor({
                   </div>
                 )}
 
-                {/* Optimise condition step */}
                 {step.kind === "optimise_condition" && (
                   <div className="space-y-3">
                     <div className="space-y-2">
@@ -478,9 +493,9 @@ function WorkflowPlanEditor({
                           placeholder="unit"
                         />
                       </div>
-                      {(!step.condition_label || step.condition_label === "condition" || !step.condition_value) && (
+                      {(!step.condition_label?.trim() || step.condition_value === undefined || step.condition_value === null) && (
                         <p className="text-[10px] text-amber-600">
-                          Set the operating condition name and value above (e.g. power_W = 80).
+                          Set the operating condition name and value above.
                         </p>
                       )}
                     </div>
@@ -569,7 +584,7 @@ function WorkflowPlanEditor({
 
       {hasInvalidBoSteps && (
         <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded p-2">
-          ⚠️ Complete the operating condition (name + value) and free parameters for all BO steps before approving.
+          ⚠️ Complete the operating condition name and value, and add free parameters for all BO steps before approving.
         </p>
       )}
 
@@ -577,7 +592,6 @@ function WorkflowPlanEditor({
         <button
           onClick={() => onApprove(editedPlan)}
           disabled={hasInvalidBoSteps}
-          title={hasInvalidBoSteps ? "Complete all BO step fields before approving" : undefined}
           className={cn(
             "flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-colors",
             hasInvalidBoSteps

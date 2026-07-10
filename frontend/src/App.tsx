@@ -58,12 +58,14 @@ function AppShell() {
 export default function App() {
   const initSession     = useMaestroStore((s) => s.initSession);
   const loadLabSettings = useMaestroStore((s) => s.loadLabSettings);
+  const loadInstruments = useMaestroStore((s) => s.loadInstruments);
 
   useEffect(() => {
     initSession();
     loadLabSettings();
-  }, [initSession, loadLabSettings]);
-
+    loadInstruments();
+  }, [initSession, loadLabSettings, loadInstruments]);
+  
   return (
     <BrowserRouter>
       <AppShell />

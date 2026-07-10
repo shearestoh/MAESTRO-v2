@@ -23,8 +23,19 @@ async function request<T>(path: string, opts?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function downloadFile(response: Response, filename: string): Promise<void> {
+  const blob = await response.blob();
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
-  // ── Session ────────────────────────────────────────────────────────────────
   createSession: () =>
     request<{ session_id: string }>("/session", { method: "POST" }),
 
@@ -55,7 +66,6 @@ export const api = {
       body:   JSON.stringify({ session_id: sessionId, plan }),
     }),
 
-  // ── Documents ──────────────────────────────────────────────────────────────
   uploadDocument: async (sessionId: string, file: File, docType: "paper" | "manual" = "paper") => {
     const form = new FormData();
     form.append("session_id", sessionId);
@@ -64,7 +74,7 @@ export const api = {
     const res = await fetch(`${BASE}/documents/upload`, { method: "POST", body: form });
     if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
     return res.json();
-  },  
+  },
 
   getDocumentStructure: (documentId: string) =>
     request<{
@@ -91,7 +101,6 @@ export const api = {
     return res.json();
   },
 
-  // ── Instruments ────────────────────────────────────────────────────────────
   listTools: () =>
     request<{ status: string; tools: VirtualInstrument[] }>("/tools"),
 
@@ -110,18 +119,26 @@ export const api = {
   deleteTool: (toolId: string) =>
     request<{ status: string }>(`/tools/${toolId}`, { method: "DELETE" }),
 
-  // ── Plot ───────────────────────────────────────────────────────────────────
-  getPlotUrl: (sessionId: string) => `${BASE}/plot/${sessionId}`,
+  buildPlotUrl: (sessionId: string) => `${BASE}/plot/${sessionId}`,
 
-  // ── Exports ────────────────────────────────────────────────────────────────
-  exportResultsCsv:   (sessionId: string) =>
-    fetch(`${BASE}/export/results-csv/${sessionId}`,   { method: "POST" }),
-  exportResultsJson:  (sessionId: string) =>
-    fetch(`${BASE}/export/results-json/${sessionId}`,  { method: "POST" }),
-  exportCampaignJson: (sessionId: string) =>
-    fetch(`${BASE}/export/campaign-json/${sessionId}`, { method: "POST" }),
+  exportResultsCsv: async (sessionId: string) => {
+    const res = await fetch(`${BASE}/export/results-csv/${sessionId}`, { method: "POST" });
+    if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+    await downloadFile(res, "maestro_results.csv");
+  },
 
-  // ── Lab Settings ───────────────────────────────────────────────────────────
+  exportResultsJson: async (sessionId: string) => {
+    const res = await fetch(`${BASE}/export/results-json/${sessionId}`, { method: "POST" });
+    if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+    await downloadFile(res, "maestro_results.json");
+  },
+
+  exportCampaignJson: async (sessionId: string) => {
+    const res = await fetch(`${BASE}/export/campaign-json/${sessionId}`, { method: "POST" });
+    if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+    await downloadFile(res, "maestro_campaign.json");
+  },
+
   getLabSettings: () =>
     request<{ status: string; settings: LabSettings }>("/lab-settings"),
 
@@ -131,14 +148,12 @@ export const api = {
       body:   JSON.stringify(updates),
     }),
 
-  // ── Document Library ───────────────────────────────────────────────────────
   listLibrary: () =>
     request<{ status: string; documents: DocumentLibraryEntry[] }>("/library"),
 
   removeFromLibrary: (documentId: string) =>
     request<{ status: string }>(`/library/${documentId}`, { method: "DELETE" }),
 
-  // ── Optimisation Library ───────────────────────────────────────────────────
   listOptimisationLibrary: () =>
     request<{ status: string; libraries: OptimisationLibraryEntry[] }>("/optimisation-library"),
 
@@ -151,7 +166,6 @@ export const api = {
   removeFromOptimisationLibrary: (libId: string) =>
     request<{ status: string }>(`/optimisation-library/${libId}`, { method: "DELETE" }),
 
-  // ── Optimiser config ───────────────────────────────────────────────────────
   updateSessionOptimiser: (
     sessionId:      string,
     name:           string,
@@ -168,7 +182,6 @@ export const api = {
       }),
     }),
 
-  // ── Resource Inventory ─────────────────────────────────────────────────────
   listResources: () =>
     request<{ status: string; resources: LabResource[] }>("/resources"),
 
@@ -187,7 +200,6 @@ export const api = {
   deleteResource: (resourceId: string) =>
     request<{ status: string }>(`/resources/${resourceId}`, { method: "DELETE" }),
 
-  // ── Protocols ──────────────────────────────────────────────────────────────
   listProtocols: () =>
     request<{ status: string; protocols: ProtocolEntry[] }>("/protocols"),
 

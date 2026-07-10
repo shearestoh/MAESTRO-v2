@@ -10,7 +10,7 @@ const panelHeaderCls = "text-sm font-semibold text-slate-700";
 export function Dashboard() {
   return (
     <div className="flex flex-col h-full overflow-hidden bg-slate-50">
-      <div className="flex-1 grid grid-cols-[1fr_1fr_280px] gap-3 p-4 min-h-0">
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_1fr_280px] gap-3 p-4 min-h-0">
 
         {/* Chat */}
         <div className="glass-panel flex flex-col overflow-hidden">

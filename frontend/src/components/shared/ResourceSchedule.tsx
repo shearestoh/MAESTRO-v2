@@ -109,7 +109,12 @@ export function ResourceSchedule() {
   const projEntries:   ProjectedScheduleEntry[] = state?.projected_schedule ?? [];
   const bgActive = state?.background_job_active ?? false;
 
-  const instrumentSet = new Set<string>(ALWAYS_SHOW);
+  const instruments = useMaestroStore((s) => s.instruments);
+  const physicalInstrumentNames = instruments
+    .filter((i) => i.category === "physical")
+    .map((i) => i.name);
+
+  const instrumentSet = new Set<string>(physicalInstrumentNames);
   actualEntries.forEach((e) => {
     if (e.instrument && !["unknown", "memory", "reporting", "knowledge", "optimiser", ""].includes(e.instrument))
       instrumentSet.add(e.instrument);

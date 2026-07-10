@@ -1,16 +1,7 @@
-"""
-LLM interface for MAESTRO.
-
-Context strategy:
-  Always injected: base rules, instrument registry, lab identity,
-  document title list (with type), optimisation library, database schema.
-
-  Retrieved on demand: relevant passages from loaded documents are retrieved
-  for every user message when documents are present — no keyword gate.
-"""
 from __future__ import annotations
 
 import json
+import time
 
 from openai import OpenAI
 
@@ -165,40 +156,45 @@ def build_dynamic_system_prompt() -> str:
     )
 
 
-def _retrieve_doc_context(session, query: str, max_chars: int = 3500) -> str:
-    """
-    Retrieve relevant passages from loaded documents for the given query.
-    Called for every user message when documents are present.
-    Returns empty string if nothing relevant is found.
-    """
+def _retrieve_doc_context(session, query: str, max_chars: int = 4000) -> str:
     from app.core.documents import DOCUMENTS, retrieve_relevant_passages
 
     if not DOCUMENTS:
         return ""
 
-    doc_ids = []
+    chunks = []
+
     if session.active_document_id and session.active_document_id in DOCUMENTS:
-        doc_ids.append(session.active_document_id)
-    for doc_id in DOCUMENTS:
-        if doc_id not in doc_ids:
-            doc_ids.append(doc_id)
-
-    doc_ids        = doc_ids[:3]
-    budget_per_doc = max_chars // len(doc_ids)
-    chunks         = []
-
-    for doc_id in doc_ids:
-        doc = DOCUMENTS[doc_id]
+        active_doc    = DOCUMENTS[session.active_document_id]
+        active_budget = (max_chars * 2) // 3
         try:
             passages = retrieve_relevant_passages(
-                doc_id, query=query, top_k=3, max_chars=budget_per_doc
+                session.active_document_id, query=query, top_k=4, max_chars=active_budget
             )
             if passages:
                 chunks.append(
-                    f"\n--- {doc.title or doc.filename} ---\n" + "\n\n".join(passages)
+                    f"\n--- {active_doc.title or active_doc.filename} (active) ---\n"
+                    + "\n\n".join(passages)
                 )
         except Exception:
             pass
+
+    other_ids    = [d for d in DOCUMENTS if d != session.active_document_id][:2]
+    other_budget = max_chars // 3
+    if other_ids:
+        per_doc = max(500, other_budget // len(other_ids))
+        for doc_id in other_ids:
+            doc = DOCUMENTS[doc_id]
+            try:
+                passages = retrieve_relevant_passages(
+                    doc_id, query=query, top_k=2, max_chars=per_doc
+                )
+                if passages:
+                    chunks.append(
+                        f"\n--- {doc.title or doc.filename} ---\n" + "\n\n".join(passages)
+                    )
+            except Exception:
+                pass
 
     return ("RETRIEVED DOCUMENT CONTEXT:\n" + "\n".join(chunks)) if chunks else ""
 
@@ -206,16 +202,25 @@ def _retrieve_doc_context(session, query: str, max_chars: int = 3500) -> str:
 def call_llm(messages: list, tools=None, tool_choice: str = "auto"):
     safe_messages = trim_messages_to_budget(messages)
     kwargs: dict = {
-        "model":      MODEL_NAME,
-        "messages":   safe_messages,
-        "max_tokens": _MAX_OUTPUT_TOKENS,
+        "model":       MODEL_NAME,
+        "messages":    safe_messages,
+        "max_tokens":  _MAX_OUTPUT_TOKENS,
         "temperature": 0.2,
     }
     if tools is not None:
         kwargs["tools"]       = tools
         kwargs["tool_choice"] = tool_choice
-    resp = client.chat.completions.create(**kwargs)
-    return resp.choices[0].message
+
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message
+        except Exception as e:
+            last_exc = e
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+    raise last_exc
 
 
 def build_tools_schema() -> list:
@@ -431,18 +436,13 @@ def build_lab_context_message(session) -> dict:
 
 
 def _ensure_tool_calls_answered(messages: list) -> list:
-    """
-    Return a copy of messages with synthetic tool responses injected for any
-    unanswered tool_calls. Operates on the copy only — never mutates the original.
-    This ensures the message chain sent to the API is always valid.
-    """
-    result      = list(messages)
-    responded   = {
+    result    = list(messages)
+    responded = {
         m["tool_call_id"]
         for m in result
         if m.get("role") == "tool" and m.get("tool_call_id")
     }
-    injections  = []
+    injections = []
     for i, msg in enumerate(result):
         if msg.get("role") != "assistant":
             continue
@@ -466,13 +466,6 @@ def _ensure_tool_calls_answered(messages: list) -> list:
 
 
 def llm_plan(session) -> dict:
-    """
-    Build the call-time message list, inject context, call the API,
-    and append the result to session.agent_state.messages.
-
-    _ensure_tool_calls_answered operates on a COPY only.
-    session.agent_state.messages is mutated only by the final append.
-    """
     dynamic_system = build_dynamic_system_prompt()
 
     messages = list(session.agent_state.messages)
@@ -495,8 +488,6 @@ def llm_plan(session) -> dict:
                 messages.append({"role": "system", "content": doc_context})
 
     messages.append(build_lab_context_message(session))
-
-    # Ensure valid tool call chains in the call-time copy only
     messages = _ensure_tool_calls_answered(messages)
 
     msg = call_llm(messages, tools=build_tools_schema())

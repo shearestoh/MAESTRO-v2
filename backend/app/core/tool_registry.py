@@ -253,23 +253,25 @@ class InstrumentRegistry:
 
 
 INSTRUMENT_REGISTRY = InstrumentRegistry()
-TOOL_REGISTRY       = INSTRUMENT_REGISTRY
+TOOL_REGISTRY = InstrumentRegistry()
 
 
 def register_default_instruments() -> None:
-    """
-    Register demo instruments for the battery electrode optimisation example.
-    Only runs if no instruments exist in the database.
-    """
-    INSTRUMENT_REGISTRY.load_from_db()
+    TOOL_REGISTRY.load_from_db()
 
-    if INSTRUMENT_REGISTRY.list_all():
-        print(f"[INFO] Loaded {len(INSTRUMENT_REGISTRY.list_all())} instrument(s) from database")
+    if TOOL_REGISTRY.list_all():
+        print(f"[INFO] Loaded {len(TOOL_REGISTRY.list_all())} instrument(s) from database")
         return
 
-    print("[INFO] No instruments found — registering demo instruments")
+    import os
+    demo_mode = os.getenv("MAESTRO_DEMO_MODE", "true").lower() != "false"
+    if not demo_mode:
+        print("[INFO] No instruments found. Add instruments via Lab Setup.")
+        return
 
-    INSTRUMENT_REGISTRY.register(VirtualInstrument(
+    print("[INFO] Registering demo instruments (set MAESTRO_DEMO_MODE=false to skip)")
+
+    TOOL_REGISTRY.register(VirtualInstrument(
         name="Electrode Coater",
         kind="instrument",
         category="physical",
@@ -307,7 +309,7 @@ def register_default_instruments() -> None:
         is_default=True,
     ))
 
-    INSTRUMENT_REGISTRY.register(VirtualInstrument(
+    TOOL_REGISTRY.register(VirtualInstrument(
         name="Potentiostat",
         kind="instrument",
         category="physical",
@@ -343,7 +345,7 @@ def register_default_instruments() -> None:
         is_default=True,
     ))
 
-    INSTRUMENT_REGISTRY.register(VirtualInstrument(
+    TOOL_REGISTRY.register(VirtualInstrument(
         name="SQLite Database",
         kind="data",
         category="computational",

@@ -3,7 +3,7 @@ import { useMaestroStore } from "@/store/maestroStore";
 import { cn }              from "@/lib/utils";
 import { ChevronDown, ChevronRight, AlertTriangle } from "lucide-react";
 import type { Sample, ResultEntry, OutstandingTask, WorkflowStep } from "@/types";
-import { getBestOutput } from "@/types";
+import { getBestOutput } from "@/lib/utils";
 
 type Tab = "synthesis" | "characterisation" | "computation";
 

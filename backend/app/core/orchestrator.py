@@ -46,10 +46,12 @@ def _lock_for(session_id: str) -> threading.Lock:
 
 
 def _welcome_message() -> dict:
+    from app.core.lab_config import get_lab_settings
+    lab_name = get_lab_settings().lab_name or "your lab"
     return {
         "role": "assistant",
         "content": (
-            "Welcome to **MAESTRO** — your agentic scientific orchestrator.\n\n"
+            f"Welcome to **MAESTRO** — your agentic orchestrator for **{lab_name}**.\n\n"
             "You can:\n"
             "- Design and run experimental campaigns\n"
             "- Upload papers and manuals to the Library for reference and reproduction\n"
@@ -337,40 +339,35 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
     dag_context  = {}
     tool_results = []
 
-    step_kind_map = {
-        "list_samples":   "list_samples",
-        "generate_plot":  "generate_plot",
-        "analyse_data":   "analyse_data",
-        "query_database": "query_database",
-    }
+    _executable_kinds = {"list_samples", "generate_plot", "analyse_data", "query_database"}
 
-    for tc in pending_calls:
-        name = tc["function"]["name"]
-        if name not in step_kind_map:
+    for step in plan:
+        if step.get("kind") not in _executable_kinds:
             continue
-        args = _safe_parse_args(tc)
-        step = {
-            "kind":          step_kind_map[name],
-            "label":         args.get("description", name),
-            "plot_code":     args.get("plot_code", ""),
-            "analysis_code": args.get("analysis_code", ""),
-            "sql":           args.get("sql", ""),
-            "description":   args.get("description", ""),
-        }
         try:
             result = execute_plan_step(session, step, query_database, dag_context)
         except Exception as e:
             result = {"status": "error", "message": str(e)}
+        tool_results.append((step.get("kind"), result))
 
+        if step.get("kind") == "generate_plot" and result.get("status") == "ok":
+            session.agent_state.messages.append({
+                "role":    "assistant",
+                "content": f"Here is the summary figure:\n\n![Summary](/api/plot/{session.session_id})",
+            })
+
+    # Append tool responses for every pending call so the message chain stays valid
+    summary_result = json.dumps(
+        {"status": "ok", "results": [r for _, r in tool_results]}, default=str
+    )
+    for tc in pending_calls:
         _append_tool_response(
-            session, tc["id"], name,
-            json.dumps(result, default=str),
+            session, tc["id"], tc["function"]["name"], summary_result
         )
-        tool_results.append((name, result))
 
     needs_followup = any(
-        name in ("query_database", "list_samples")
-        for name, _ in tool_results
+        kind in ("query_database", "list_samples")
+        for kind, _ in tool_results
     )
     if needs_followup:
         with lock:
@@ -380,14 +377,12 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
         with lock:
             session.equipment_status.llm = False
             session.current_activity     = None
-            
+
         if session.agent_state.awaiting_confirmation:
             followup_calls = list(session.agent_state.pending_tool_calls)
-            followup_names = [tc["function"]["name"] for tc in followup_calls]
             followup_plan  = build_execution_plan_from_tool_calls(session, followup_calls)
             if not _plan_requires_approval(followup_plan):
                 _execute_non_instrument_actions(session, lock, followup_plan, followup_calls)
-
 
 def _sync_condition_key(session: SessionModel) -> None:
     if session.extracted_campaign:
