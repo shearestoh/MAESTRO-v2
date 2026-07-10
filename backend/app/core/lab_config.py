@@ -218,3 +218,34 @@ def load_library_documents_into_store() -> None:
             print(f"[WARN] Could not reload library document {entry.filename}: {e}")
     if loaded:
         print(f"[INFO] Loaded {loaded} document(s) from library into memory")
+
+    # Migrate resources and protocols from lab_config.json to SQLite if present
+    _migrate_resources_and_protocols()
+
+
+def _migrate_resources_and_protocols() -> None:
+    """One-time migration of resources/protocols from lab_config.json to SQLite."""
+    from app.core.database import get_all_resources, upsert_resource, get_all_protocols, upsert_protocol
+    settings = get_lab_settings()
+
+    # Migrate resources
+    if hasattr(settings, "resource_inventory") and settings.resource_inventory:
+        existing_ids = {r["resource_id"] for r in get_all_resources()}
+        migrated = 0
+        for r in settings.resource_inventory:
+            if r.resource_id not in existing_ids:
+                upsert_resource(r.model_dump())
+                migrated += 1
+        if migrated:
+            print(f"[INFO] Migrated {migrated} resource(s) from lab_config.json to SQLite")
+
+    # Migrate protocols
+    if hasattr(settings, "protocols") and settings.protocols:
+        existing_ids = {p["protocol_id"] for p in get_all_protocols()}
+        migrated = 0
+        for p in settings.protocols:
+            if p.protocol_id not in existing_ids:
+                upsert_protocol(p.model_dump())
+                migrated += 1
+        if migrated:
+            print(f"[INFO] Migrated {migrated} protocol(s) from lab_config.json to SQLite")

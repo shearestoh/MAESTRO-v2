@@ -1,9 +1,5 @@
 """
-Persistent store for experimental evaluations.
-
-Schema uses a generic design: condition_name/condition_value capture the
-primary operating condition, and a JSON 'parameters' column stores all
-free parameters. This makes the schema instrument-agnostic.
+Persistent store for experimental evaluations, resources, and protocols.
 """
 import json
 import sqlite3
@@ -18,9 +14,29 @@ DB_SCHEMA = (
     "  condition_name   TEXT    — name of the operating condition (e.g. 'power_W')\n"
     "  condition_value  REAL    — value of the operating condition\n"
     "  parameters       TEXT    — JSON object of free parameter name→value pairs\n"
-    "  objective_name   TEXT    — name of the measured objective (e.g. 'specific_energy')\n"
+    "  objective_name   TEXT    — name of the measured objective\n"
     "  objective_value  REAL    — measured objective value\n"
     "  timestamp        TEXT    — ISO timestamp of the measurement\n"
+    "\nTable: resources\n"
+    "Columns:\n"
+    "  resource_id      TEXT    — UUID primary key\n"
+    "  name             TEXT    — resource name (e.g. 'Coin Cell Casing')\n"
+    "  unit             TEXT    — unit of measurement (e.g. 'units', 'mL')\n"
+    "  current_stock    REAL    — current quantity in stock\n"
+    "  min_stock        REAL    — minimum stock alert threshold\n"
+    "  description      TEXT    — description of the resource\n"
+    "  consumption_rules TEXT   — JSON list of {instrument_name, amount_per_use}\n"
+    "\nTable: protocols\n"
+    "Columns:\n"
+    "  protocol_id      TEXT    — UUID primary key\n"
+    "  name             TEXT    — protocol name\n"
+    "  description      TEXT    — brief description\n"
+    "  created_at       TEXT    — ISO timestamp\n"
+    "  optimiser_used   TEXT    — optimiser(s) used\n"
+    "  results_summary  TEXT    — summary of results achieved\n"
+    "  user_instructions TEXT   — JSON list of user messages\n"
+    "  notes            TEXT    — scientist's notes\n"
+    "  workflow_plan    TEXT    — JSON workflow plan\n"
 )
 
 
@@ -41,6 +57,7 @@ def init_db() -> None:
     """)
     con.commit()
     con.close()
+    ensure_db()
 
 
 def ensure_db() -> None:
@@ -55,6 +72,30 @@ def ensure_db() -> None:
             objective_name  TEXT    NOT NULL,
             objective_value REAL    NOT NULL,
             timestamp       TEXT    NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS resources (
+            resource_id       TEXT PRIMARY KEY,
+            name              TEXT NOT NULL,
+            unit              TEXT NOT NULL DEFAULT '',
+            current_stock     REAL NOT NULL DEFAULT 0,
+            min_stock         REAL NOT NULL DEFAULT 0,
+            description       TEXT NOT NULL DEFAULT '',
+            consumption_rules TEXT NOT NULL DEFAULT '[]'
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS protocols (
+            protocol_id       TEXT PRIMARY KEY,
+            name              TEXT NOT NULL,
+            description       TEXT NOT NULL DEFAULT '',
+            created_at        TEXT NOT NULL DEFAULT '',
+            optimiser_used    TEXT NOT NULL DEFAULT '',
+            results_summary   TEXT NOT NULL DEFAULT '',
+            user_instructions TEXT NOT NULL DEFAULT '[]',
+            notes             TEXT NOT NULL DEFAULT '',
+            workflow_plan     TEXT NOT NULL DEFAULT '{}'
         )
     """)
     con.commit()
@@ -75,14 +116,8 @@ def write_evaluation(
         "INSERT INTO evaluations "
         "(condition_name, condition_value, parameters, objective_name, objective_value, timestamp) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            condition_name,
-            condition_value,
-            json.dumps(parameters),
-            objective_name,
-            objective_value,
-            timestamp,
-        ),
+        (condition_name, condition_value, json.dumps(parameters),
+         objective_name, objective_value, timestamp),
     )
     con.commit()
     con.close()
@@ -92,10 +127,8 @@ def query_database(sql: str, max_rows: int = 100) -> dict:
     sql = sql.strip()
     if not sql.upper().startswith("SELECT"):
         return {"status": "error", "message": "Only SELECT statements are permitted."}
-
     if "LIMIT" not in sql.upper():
         sql = f"{sql} LIMIT {max_rows}"
-
     try:
         con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, check_same_thread=False)
         cur = con.cursor()
@@ -113,3 +146,132 @@ def query_database(sql: str, max_rows: int = 100) -> dict:
         return {"status": "error", "message": f"Database error: {e}"}
     except Exception as e:
         return {"status": "error", "message": f"{type(e).__name__}: {e}"}
+
+
+# ── Resource CRUD ─────────────────────────────────────────────────────────────
+
+def get_all_resources() -> List[dict]:
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    rows = cur.execute("SELECT * FROM resources").fetchall()
+    con.close()
+    result = []
+    for row in rows:
+        result.append({
+            "resource_id":       row[0],
+            "name":              row[1],
+            "unit":              row[2],
+            "current_stock":     row[3],
+            "min_stock":         row[4],
+            "description":       row[5],
+            "consumption_rules": json.loads(row[6]),
+        })
+    return result
+
+
+def upsert_resource(resource: dict) -> None:
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("""
+        INSERT OR REPLACE INTO resources
+        (resource_id, name, unit, current_stock, min_stock, description, consumption_rules)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        resource["resource_id"],
+        resource["name"],
+        resource.get("unit", ""),
+        resource.get("current_stock", 0),
+        resource.get("min_stock", 0),
+        resource.get("description", ""),
+        json.dumps(resource.get("consumption_rules", [])),
+    ))
+    con.commit()
+    con.close()
+
+
+def delete_resource(resource_id: str) -> bool:
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("DELETE FROM resources WHERE resource_id = ?", (resource_id,))
+    deleted = cur.rowcount > 0
+    con.commit()
+    con.close()
+    return deleted
+
+
+def update_resource_stock(resource_id: str, new_stock: float) -> None:
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "UPDATE resources SET current_stock = ? WHERE resource_id = ?",
+        (new_stock, resource_id),
+    )
+    con.commit()
+    con.close()
+
+
+# ── Protocol CRUD ─────────────────────────────────────────────────────────────
+
+def get_all_protocols() -> List[dict]:
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    rows = cur.execute("SELECT * FROM protocols ORDER BY created_at DESC").fetchall()
+    con.close()
+    result = []
+    for row in rows:
+        result.append({
+            "protocol_id":        row[0],
+            "name":               row[1],
+            "description":        row[2],
+            "created_at":         row[3],
+            "optimiser_used":     row[4],
+            "results_summary":    row[5],
+            "user_instructions":  json.loads(row[6]),
+            "notes":              row[7],
+            "workflow_plan":      json.loads(row[8]) if row[8] and row[8] != '{}' else None,
+        })
+    return result
+
+
+def upsert_protocol(protocol: dict) -> None:
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("""
+        INSERT OR REPLACE INTO protocols
+        (protocol_id, name, description, created_at, optimiser_used,
+         results_summary, user_instructions, notes, workflow_plan)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        protocol["protocol_id"],
+        protocol["name"],
+        protocol.get("description", ""),
+        protocol.get("created_at", ""),
+        protocol.get("optimiser_used", ""),
+        protocol.get("results_summary", ""),
+        json.dumps(protocol.get("user_instructions", [])),
+        protocol.get("notes", ""),
+        json.dumps(protocol.get("workflow_plan")) if protocol.get("workflow_plan") else "{}",
+    ))
+    con.commit()
+    con.close()
+
+
+def delete_protocol(protocol_id: str) -> bool:
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("DELETE FROM protocols WHERE protocol_id = ?", (protocol_id,))
+    deleted = cur.rowcount > 0
+    con.commit()
+    con.close()
+    return deleted
+
+
+def update_protocol_notes(protocol_id: str, notes: str) -> None:
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "UPDATE protocols SET notes = ? WHERE protocol_id = ?",
+        (notes, protocol_id),
+    )
+    con.commit()
+    con.close()

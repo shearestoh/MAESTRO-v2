@@ -11,6 +11,15 @@
       "uploaded_at": "2026-07-06T12:01:31.260205",
       "file_path": "lab_documents/f6cf5a8e-cefd-43b1-9588-2e8623180ce7.pdf",
       "doc_type": "paper"
+    },
+    {
+      "document_id": "2002d31e-4ef4-4753-8d16-54bfa5c7a04e",
+      "filename": "Elicitation Matters- How Prompts and Query Protocols Shape LLM Surrogates under Sparse Observations (1).pdf",
+      "title": "Elicitation Matters: How Prompts and Query Protocols Shape LLM Surrogates under Sparse Observations",
+      "summary": null,
+      "uploaded_at": "2026-07-09T17:44:02.271064",
+      "file_path": "lab_documents/2002d31e-4ef4-4753-8d16-54bfa5c7a04e.pdf",
+      "doc_type": "paper"
     }
   ],
   "optimisation_library": [
@@ -90,5 +99,23 @@
       "enabled": true,
       "is_default": false
     }
-  ]
+  ],
+  "resource_inventory": [
+    {
+      "resource_id": "335731a9-2647-4dd3-acde-5a1cec830177",
+      "name": "Coin cell casing",
+      "unit": "pc",
+      "current_stock": 100.0,
+      "min_stock": 20.0,
+      "description": "Coin cell casing to contain the cathode, separator, anode and electrolyte components.",
+      "consumption_rules": [
+        {
+          "instrument_name": "Electrode Coater",
+          "amount_per_use": 1.0,
+          "description": ""
+        }
+      ]
+    }
+  ],
+  "protocols": []
 }

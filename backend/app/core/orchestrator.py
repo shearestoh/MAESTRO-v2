@@ -442,8 +442,8 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
         })
         tool_results.append((name, result))
 
-    needs_followup = any(
-        name == "query_database"
+        needs_followup = any(
+        name in ("query_database", "list_samples")
         for name, _ in tool_results
     )
 

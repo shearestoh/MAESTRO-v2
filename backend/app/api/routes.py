@@ -569,3 +569,142 @@ def update_session_optimiser(req: UpdateOptimiserRequest):
         raise HTTPException(404, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
+    
+
+# ── Protocols ─────────────────────────────────────────────────────────────────
+
+@router.get("/protocols")
+def list_protocols():
+    settings = get_lab_settings()
+    return {"status": "ok", "protocols": [p.model_dump() for p in settings.protocols]}
+
+
+@router.post("/protocols")
+def save_protocol(data: dict):
+    from app.core.models import ProtocolEntry
+    from datetime import datetime
+    try:
+        entry = ProtocolEntry(
+            **data,
+            created_at=datetime.utcnow().isoformat() + "Z",
+        )
+        settings = get_lab_settings()
+        settings.protocols.append(entry)
+        save_lab_settings(settings)
+        return {"status": "ok", "protocol": entry.model_dump()}
+    except Exception as e:
+        raise HTTPException(400, f"Invalid protocol: {e}")
+
+
+@router.put("/protocols/{protocol_id}")
+def update_protocol(protocol_id: str, updates: dict):
+    from app.core.models import ProtocolEntry
+    settings = get_lab_settings()
+    for i, p in enumerate(settings.protocols):
+        if p.protocol_id == protocol_id:
+            data = p.model_dump()
+            data.update(updates)
+            settings.protocols[i] = ProtocolEntry(**data)
+            save_lab_settings(settings)
+            return {"status": "ok", "protocol": settings.protocols[i].model_dump()}
+    raise HTTPException(404, f"Protocol {protocol_id} not found")
+
+
+@router.delete("/protocols/{protocol_id}")
+def delete_protocol(protocol_id: str):
+    settings = get_lab_settings()
+    original = len(settings.protocols)
+    settings.protocols = [p for p in settings.protocols if p.protocol_id != protocol_id]
+    if len(settings.protocols) == original:
+        raise HTTPException(404, f"Protocol {protocol_id} not found")
+    save_lab_settings(settings)
+    return {"status": "ok"}    
+
+
+# ── Resource Inventory ────────────────────────────────────────────────────────
+
+@router.get("/resources")
+def list_resources():
+    from app.core.database import get_all_resources
+    return {"status": "ok", "resources": get_all_resources()}
+
+
+@router.post("/resources")
+def add_resource(resource_data: dict):
+    from app.core.database import upsert_resource
+    from app.core.models import LabResource
+    try:
+        resource = LabResource(**resource_data)
+        upsert_resource(resource.model_dump())
+        return {"status": "ok", "resource": resource.model_dump()}
+    except Exception as e:
+        raise HTTPException(400, f"Invalid resource: {e}")
+
+
+@router.put("/resources/{resource_id}")
+def update_resource(resource_id: str, updates: dict):
+    from app.core.database import get_all_resources, upsert_resource
+    resources = get_all_resources()
+    existing  = next((r for r in resources if r["resource_id"] == resource_id), None)
+    if not existing:
+        raise HTTPException(404, f"Resource {resource_id} not found")
+    existing.update(updates)
+    upsert_resource(existing)
+    return {"status": "ok", "resource": existing}
+
+
+@router.delete("/resources/{resource_id}")
+def delete_resource_route(resource_id: str):
+    from app.core.database import delete_resource
+    if not delete_resource(resource_id):
+        raise HTTPException(404, f"Resource {resource_id} not found")
+    return {"status": "ok"}
+
+
+# ── Protocols ─────────────────────────────────────────────────────────────────
+
+@router.get("/protocols")
+def list_protocols():
+    from app.core.database import get_all_protocols
+    return {"status": "ok", "protocols": get_all_protocols()}
+
+
+@router.post("/protocols")
+def save_protocol(data: dict):
+    from app.core.database import upsert_protocol
+    from app.core.models import ProtocolEntry
+    from datetime import datetime
+    try:
+        data.setdefault("created_at", datetime.utcnow().isoformat() + "Z")
+        entry = ProtocolEntry(**data)
+        upsert_protocol(entry.model_dump())
+        return {"status": "ok", "protocol": entry.model_dump()}
+    except Exception as e:
+        raise HTTPException(400, f"Invalid protocol: {e}")
+
+
+@router.put("/protocols/{protocol_id}")
+def update_protocol(protocol_id: str, updates: dict):
+    from app.core.database import get_all_protocols, upsert_protocol, update_protocol_notes
+    if "notes" in updates and len(updates) == 1:
+        update_protocol_notes(protocol_id, updates["notes"])
+        protocols = get_all_protocols()
+        updated   = next((p for p in protocols if p["protocol_id"] == protocol_id), None)
+        if not updated:
+            raise HTTPException(404, f"Protocol {protocol_id} not found")
+        return {"status": "ok", "protocol": updated}
+    protocols = get_all_protocols()
+    existing  = next((p for p in protocols if p["protocol_id"] == protocol_id), None)
+    if not existing:
+        raise HTTPException(404, f"Protocol {protocol_id} not found")
+    existing.update(updates)
+    upsert_protocol(existing)
+    return {"status": "ok", "protocol": existing}
+
+
+@router.delete("/protocols/{protocol_id}")
+def delete_protocol_route(protocol_id: str):
+    from app.core.database import delete_protocol
+    if not delete_protocol(protocol_id):
+        raise HTTPException(404, f"Protocol {protocol_id} not found")
+    return {"status": "ok"}

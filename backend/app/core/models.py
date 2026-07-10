@@ -85,6 +85,8 @@ class LabSettings(BaseModel):
     system_prompt_extension: str   = ""
     document_library:         List[DocumentLibraryEntry]     = Field(default_factory=list)
     optimisation_library:     List[OptimisationLibraryEntry] = Field(default_factory=list)
+    resource_inventory:       List[LabResource]              = Field(default_factory=list)
+    protocols:                List[ProtocolEntry]            = Field(default_factory=list) 
 
 
 # ── Optimiser Config ──────────────────────────────────────────────────────────
@@ -194,6 +196,25 @@ class AgentStateModel(BaseModel):
     pending_tool_calls:    List[dict] = Field(default_factory=list)
 
 
+# ── Protocols ─────────────────────────────────────────────────────────────────
+
+class ProtocolEntry(BaseModel):
+    """
+    A saved experimental protocol — a reproducible record of a MAESTRO session.
+    Stores key user instructions and the resulting workflow plan for replay and adaptation.
+    """
+    protocol_id:        str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name:               str
+    description:        str = ""
+    created_at:         str = ""
+    created_by:         str = ""
+    tags:               List[str] = Field(default_factory=list)
+    user_instructions:  List[str] = Field(default_factory=list)
+    workflow_plan:      Optional[Dict[str, Any]] = None
+    results_summary:    str = ""
+    optimiser_used:     str = ""
+    notes:              str = ""
+
 # ── Equipment ─────────────────────────────────────────────────────────────────
 
 class EquipmentStatusModel(BaseModel):
@@ -246,6 +267,26 @@ class CaseStudyExtraction(BaseModel):
     case_name:         str
     campaign:          CampaignSpec
     evidence_snippets: List[str] = Field(default_factory=list)
+
+
+# ── Resource Inventory ────────────────────────────────────────────────────────
+
+class ResourceConsumptionRule(BaseModel):
+    """Defines how much of a resource one instrument operation consumes."""
+    instrument_name: str
+    amount_per_use:  float
+    description:     str = ""
+
+
+class LabResource(BaseModel):
+    """A consumable resource tracked in the lab inventory."""
+    resource_id:   str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name:          str                        
+    unit:          str                        
+    current_stock: float = 0.0
+    min_stock:     float = 0.0                
+    description:   str = ""
+    consumption_rules: List[ResourceConsumptionRule] = Field(default_factory=list)    
 
 
 # ── Events ────────────────────────────────────────────────────────────────────

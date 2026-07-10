@@ -105,6 +105,7 @@ def _apply_instrument_delay(instrument_name: str, time_cost_seconds: float) -> N
         _time.sleep(time_cost_seconds)
 
 
+
 # ── Results store helpers ─────────────────────────────────────────────────────
 
 def get_or_create_result_for_condition(
@@ -137,6 +138,40 @@ def _log_resource(session, instrument_name: str, start_time: str, end_time: str)
     })
     session.resource_log = session.resource_log[-500:]
 
+def _deduct_resources(session, instrument_name: str) -> None:
+    """Deduct consumables from SQLite and alert on low stock."""
+    try:
+        from app.core.database import get_all_resources, update_resource_stock
+        resources = get_all_resources()
+        warnings  = []
+        for resource in resources:
+            for rule in resource.get("consumption_rules", []):
+                if rule.get("instrument_name") == instrument_name:
+                    new_stock = max(0.0, resource["current_stock"] - rule["amount_per_use"])
+                    update_resource_stock(resource["resource_id"], new_stock)
+                    resource["current_stock"] = new_stock
+                    min_s = resource.get("min_stock", 0)
+                    if min_s > 0 and new_stock <= min_s:
+                        warnings.append(
+                            f"⚠️ Low stock: **{resource['name']}** — "
+                            f"{new_stock:.1f} {resource['unit']} remaining "
+                            f"(minimum: {min_s:.1f} {resource['unit']})"
+                        )
+        if warnings:
+            session.agent_state.messages.append({
+                "role":    "assistant",
+                "content": "\n".join(warnings),
+            })
+            session.live_event_queue.append(ExecutionEvent(
+                event_type="resource_warning",
+                message=f"Low stock after using {instrument_name}",
+                equipment="memory",
+                category="execution",
+                payload={"warnings": warnings},
+            ))
+    except Exception as e:
+        print(f"[WARN] Could not deduct resources for {instrument_name}: {e}")
+
 
 def _resolve_ref(value: Any, context: Dict[str, Any]) -> Any:
     import re
@@ -159,24 +194,33 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
     from datetime import datetime as dt, timedelta, timezone
 
     now = dt.now(timezone.utc)
-    
+
     def to_iso(d: dt) -> str:
         return d.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    
-    step_end:        Dict[str, dt] = {}
-    instrument_free: Dict[str, dt] = {}
-    entries:         List[ProjectedScheduleEntry] = []
 
-    def get_duration_seconds(step: dict) -> float:
-        instrument_nm = step.get("instrument", "")
+    def get_duration_seconds(step: dict, resolved_instrument: str = "") -> float:
+        """Get time cost for a step, using registry lookup for synthesise/characterise."""
+        instrument_nm = step.get("instrument", "") or resolved_instrument
         if instrument_nm:
             cost = INSTRUMENT_REGISTRY.get_time_cost(instrument_nm, default=-1)
             if cost >= 0:
                 return cost
         kind = step.get("kind", "")
-        if kind in ("synthesise", "characterise"):
+        if kind == "synthesise":
+            synth_list = INSTRUMENT_REGISTRY.list_by_sub_category("synthesis")
+            if synth_list:
+                return INSTRUMENT_REGISTRY.get_time_cost(synth_list[0].name, default=5.0)
             return 5.0
+        if kind == "characterise":
+            char_list = INSTRUMENT_REGISTRY.list_by_sub_category("characterisation")
+            if char_list:
+                return INSTRUMENT_REGISTRY.get_time_cost(char_list[0].name, default=8.0)
+            return 8.0
         return 0.0
+
+    step_end:        Dict[str, dt] = {}
+    instrument_free: Dict[str, dt] = {}
+    entries:         List[ProjectedScheduleEntry] = []
 
     for step in plan:
         step_id      = step.get("step_id") or ""
@@ -235,16 +279,29 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
             step["projected_end_time"]   = to_iso(cursor)
 
         else:
+            # Resolve the physical instrument name for synthesise/characterise steps.
+            # The LLM may omit the instrument field — fall back to registry lookup
+            # so the Task Schedule always shows the correct physical instrument row.
+            explicit_instrument = step.get("instrument", "")
+
+            if not explicit_instrument:
+                if kind == "synthesise":
+                    synth_list = INSTRUMENT_REGISTRY.list_by_sub_category("synthesis")
+                    explicit_instrument = synth_list[0].name if synth_list else ""
+                elif kind == "characterise":
+                    char_list = INSTRUMENT_REGISTRY.list_by_sub_category("characterisation")
+                    explicit_instrument = char_list[0].name if char_list else ""
+
             raw_instrument_id = (
                 step.get("instrument_id")
-                or step.get("instrument")
-                or step.get("kind")
+                or explicit_instrument
+                or kind
                 or "unknown"
             )
             instrument_id   = str(raw_instrument_id) if raw_instrument_id is not None else "unknown"
-            raw_instrument_name = step.get("instrument") or step.get("label") or instrument_id
-            instrument_name = str(raw_instrument_name) if raw_instrument_name is not None else instrument_id
-            duration_s      = get_duration_seconds(step)
+            # Always use the resolved physical instrument name — never the step label
+            instrument_name = explicit_instrument or instrument_id
+            duration_s      = get_duration_seconds(step, resolved_instrument=instrument_name)
 
             inst_free  = instrument_free.get(instrument_id, now)
             proj_start = max(dep_end, inst_free, now)
@@ -444,6 +501,7 @@ def synthesise_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, A
     )
     session.sample_registry.append(new_sample)
     context[produces] = sample_id
+    _deduct_resources(session, instrument) 
 
     session.live_event_queue.append(ExecutionEvent(
         event_type="synthesiser_done",
@@ -552,27 +610,27 @@ def characterise_step(session, step: dict, context: Dict[str, Any]) -> Dict[str,
 
 
 def list_samples_step(session) -> Dict[str, Any]:
+    """Return sample inventory as structured data — do NOT append assistant message directly."""
     samples = session.sample_registry
     if not samples:
-        session.agent_state.messages.append({
-            "role": "assistant", "content": "No samples in the lab inventory yet.",
-        })
-        return {"status": "ok", "count": 0, "samples": []}
-
-    lines = [
-        f"## Lab Sample Inventory ({len(samples)} samples)\n",
-        "| Sample ID | Parameters | Status | Synthesised | Results |",
-        "|-----------|------------|--------|-------------|---------|",
-    ]
+        return {
+            "status":  "ok",
+            "count":   0,
+            "samples": [],
+            "message": "No samples in the lab inventory yet.",
+        }
+    rows = []
     for s in samples:
         params_str  = ", ".join(f"{k}={v}" for k, v in s.params.items())
         results_str = f"{len(s.results)} test(s)" if s.results else "untested"
-        lines.append(
-            f"| `{s.sample_id}` | {params_str} | {s.status} | "
-            f"{s.prepared_at[:16]} | {results_str} |"
-        )
-    session.agent_state.messages.append({"role": "assistant", "content": "\n".join(lines)})
-    return {"status": "ok", "count": len(samples), "samples": [s.model_dump() for s in samples]}
+        rows.append({
+            "sample_id":   s.sample_id,
+            "params":      params_str,
+            "status":      s.status,
+            "prepared_at": s.prepared_at[:16] if s.prepared_at else "",
+            "results":     results_str,
+        })
+    return {"status": "ok", "count": len(samples), "samples": rows}
 
 
 # ── BO execution engine ───────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import type {
   SessionState, VirtualInstrument, WorkflowPlan,
   LabSettings, DocumentLibraryEntry, OptimisationLibraryEntry,
+  LabResource, ProtocolEntry,
 } from "@/types";
 
 const BASE = "/api";
@@ -160,4 +161,45 @@ export const api = {
         n_initial_points: nInitialPoints,
       }),
     }),
+
+  // ── Resource Inventory ─────────────────────────────────────────────────────
+  listResources: () =>
+    request<{ status: string; resources: LabResource[] }>("/resources"),
+
+  addResource: (data: Partial<LabResource>) =>
+    request<{ status: string; resource: LabResource }>("/resources", {
+      method: "POST",
+      body:   JSON.stringify(data),
+    }),
+
+  updateResource: (resourceId: string, updates: Partial<LabResource>) =>
+    request<{ status: string; resource: LabResource }>(`/resources/${resourceId}`, {
+      method: "PUT",
+      body:   JSON.stringify(updates),
+    }),
+
+  deleteResource: (resourceId: string) =>
+    request<{ status: string }>(`/resources/${resourceId}`, { method: "DELETE" }),
+
+  // ── Protocols ──────────────────────────────────────────────────────────────
+  listProtocols: () =>
+    request<{ status: string; protocols: ProtocolEntry[] }>("/protocols"),
+
+  saveProtocol: (data: Partial<ProtocolEntry>) =>
+    request<{ status: string; protocol: ProtocolEntry }>("/protocols", {
+      method: "POST",
+      body:   JSON.stringify(data),
+    }),
+
+  updateProtocol: (protocolId: string, updates: Partial<ProtocolEntry>) =>
+    request<{ status: string; protocol: ProtocolEntry }>(`/protocols/${protocolId}`, {
+      method: "PUT",
+      body:   JSON.stringify(updates),
+    }),
+
+  deleteProtocol: (protocolId: string) =>
+    request<{ status: string }>(`/protocols/${protocolId}`, { method: "DELETE" }),
+
 };
+
+

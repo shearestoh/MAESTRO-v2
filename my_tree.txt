@@ -1,4 +1,5 @@
 .
+├── README.md
 ├── backend
 │   ├── README.md
 │   ├── app
@@ -21,7 +22,6 @@
 │   │   │   ├── database.py
 │   │   │   ├── documents.py
 │   │   │   ├── extraction.py
-│   │   │   ├── lab.py
 │   │   │   ├── lab_config.py
 │   │   │   ├── llm.py
 │   │   │   ├── models.py
@@ -32,11 +32,15 @@
 │   │       ├── __init__.py
 │   │       ├── base.py
 │   │       ├── catalogue.py
+│   │       ├── deap_bo.py
 │   │       ├── gp_bo.py
+│   │       ├── honegumi_bo.py
+│   │       ├── optuna_bo.py
 │   │       └── random_search.py
 │   ├── lab_config.json
 │   ├── lab_documents
-│   │   └── 1a5c3552-942e-460f-9cf3-59315ff94277.pdf
+│   │   ├── 2002d31e-4ef4-4753-8d16-54bfa5c7a04e.pdf
+│   │   └── f6cf5a8e-cefd-43b1-9588-2e8623180ce7.pdf
 │   ├── maestro.db
 │   ├── main.py
 │   ├── pyproject.toml
@@ -1235,6 +1239,8 @@
 │   ├── tsconfig.json
 │   ├── tsconfig.node.json
 │   └── vite.config.ts
+├── lab_config.json
+├── maestro.db
 └── my_tree.txt
 
-396 directories, 842 files
+396 directories, 848 files

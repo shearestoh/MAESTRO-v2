@@ -1,12 +1,21 @@
 """
 LLM interface for MAESTRO.
 
-System prompt is built dynamically from lab config, registered instruments,
-available optimisation libraries, library documents (RAG), and the DB schema.
+Architecture: lean always-injected context + on-demand retrieval via tools.
 
-Model: gpt-4o-mini via GitHub Models (Azure inference endpoint).
-Context window: 128K tokens. GitHub free-tier enforces ~8K input tokens per
-request, so _MAX_PROMPT_CHARS is set conservatively to stay within that limit.
+Always injected (small, ~2KB):
+  - Base rules and tool instructions
+  - Registered instrument registry (names, parameters, outputs)
+  - Lab identity and safety rules
+  - Document title list (not full summaries)
+  - Current session state (evaluations count, active campaign)
+
+Retrieved on demand via tools:
+  - Document content → retrieve_relevant_passages() called by extract_and_check_feasibility
+  - Resource inventory → query_database("SELECT * FROM resources")
+  - Protocols → query_database("SELECT * FROM protocols")
+  - Results → query_database("SELECT * FROM evaluations ...")
+  - Sample registry → list_samples tool
 """
 from __future__ import annotations
 
@@ -24,8 +33,6 @@ client = OpenAI(
     api_key=GITHUB_TOKEN,
 )
 
-# GitHub Models free tier: ~8K input tokens per request (~4 chars/token).
-# Reserve ~2K tokens for system prompt + dynamic context + response headroom.
 _MAX_PROMPT_CHARS  = 24_000
 _MAX_OUTPUT_TOKENS = 4_000
 
@@ -87,120 +94,96 @@ RULES:
 - Non-instrument actions (analysis, plotting, database queries, document questions) → execute immediately without a plan.
 - Paper reproduction → call extract_and_check_feasibility, then present as a workflow plan.
 
-WORKFLOW STEP KINDS:
-- synthesise: prepare a physical sample using a synthesis instrument
-- characterise: measure a prepared sample using a characterisation instrument
-- optimise_condition: closed-loop optimisation campaign — specify optimiser_name per step
-- generate_plot, analyse_data, query_database, list_samples: immediate, no approval needed
+CAPABILITY AWARENESS — CHECK BEFORE PROPOSING ANY WORKFLOW:
+  Before proposing a workflow, verify the registered instruments can execute the task:
+  1. PARAMETERS: Does any instrument control the requested parameters? Match user terminology to instrument parameter names and descriptions. Ask a clarifying question if ambiguous.
+  2. OUTPUTS: Does any instrument measure the requested objective? If not, state clearly what is missing.
+  3. RESOURCES: Query the resources table to check consumable stock before running experiments that consume materials.
+  4. HISTORY: Query the protocols table to find relevant past experiments before starting new ones.
+  If the lab CANNOT execute the request, explain which instruments are registered and what is missing.
+
+DATABASE RETRIEVAL — USE THESE QUERIES:
+  Resource inventory:  SELECT * FROM resources
+  Protocols/history:   SELECT protocol_id, name, description, optimiser_used, results_summary, created_at FROM protocols ORDER BY created_at DESC
+  Past results:        SELECT condition_name, condition_value, objective_name, objective_value, parameters FROM evaluations ORDER BY timestamp DESC LIMIT 20
+  Sample notebook:     Use the list_samples tool
 
 MULTI-STEP WORKFLOWS — CRITICAL:
-  When the user requests multiple optimisation experiments, put ALL steps in a SINGLE
-  plan_workflow call. Each step MUST include a "label" field.
-
+  Put ALL steps in a SINGLE plan_workflow call. Each step MUST include a "label" field.
   Example for "optimise <objective> at <condA> and <condB> using two optimisers":
-    plan_workflow(
-      summary="Optimise <objective> at <condA> and <condB> using GP-BO and Random Search",
-      steps=[
-        {
-          "kind": "optimise_condition",
-          "label": "Optimise <objective> at <condA> [gp_bo]",
-          "condition_label": "<condition_name>",
-          "condition_value": <condA_value>,
-          "condition_unit": "<unit>",
-          "free_params": [{"name": "<param1>", "min": <lo>, "max": <hi>, "unit": "<unit>"}],
-          "objective_metric": "<output_name>",
-          "optimiser_name": "gp_bo",
-          "n_calls": <n>,
-          "n_initial_points": <k>
-        },
-        {
-          "kind": "optimise_condition",
-          "label": "Optimise <objective> at <condA> [random]",
-          "condition_label": "<condition_name>",
-          "condition_value": <condA_value>,
-          "condition_unit": "<unit>",
-          "free_params": [{"name": "<param1>", "min": <lo>, "max": <hi>, "unit": "<unit>"}],
-          "objective_metric": "<output_name>",
-          "optimiser_name": "random",
-          "n_calls": <n>,
-          "n_initial_points": <k>
-        }
-      ]
-    )
-  Repeat for each additional condition. Never split into separate plan_workflow calls.
+    plan_workflow(summary="...", steps=[
+      {"kind": "optimise_condition", "label": "Optimise <objective> at <condA> [gp_bo]",
+       "condition_label": "<name>", "condition_value": <A>, "condition_unit": "<unit>",
+       "free_params": [{"name": "<p>", "min": <lo>, "max": <hi>, "unit": "<u>"}],
+       "objective_metric": "<out>", "optimiser_name": "gp_bo", "n_calls": <n>, "n_initial_points": <k>},
+      ... (repeat for each condition × optimiser combination)
+    ])
 
 OPTIMISE_CONDITION — ALL FIELDS REQUIRED:
-  label: short description — ALWAYS INCLUDE, e.g. "Optimise yield at temperature=200 [gp_bo]"
-  condition_label: name of the fixed operating condition (e.g. "temperature_C", "flow_rate")
-  condition_value: numeric value — NEVER 0 unless 0 is genuinely correct
-  condition_unit: unit string (e.g. "°C", "mL/min", "W")
-  free_params: [{name, min, max, unit}] — parameters the optimiser searches over
-  objective_metric: output to maximise — must match a registered instrument output
-  optimiser_name: key of the algorithm — MUST be specified per step:
-    "gp_bo"    → scikit-optimize GP-BO (default, always available)
-    "random"   → uniform random search (always available)
-    "optuna"   → Optuna TPE (pip install optuna)
-    "honegumi" → Ax Platform (pip install ax-platform honegumi)
-    "deap"     → Evolutionary (pip install deap)
-  n_calls: total evaluations (integer)
-  n_initial_points: random evaluations before model fitting (integer; ignored for random/deap)
+  label, condition_label, condition_value, condition_unit,
+  free_params [{name, min, max, unit}], objective_metric,
+  optimiser_name: "gp_bo" | "random" | "optuna" | "honegumi" | "deap",
+  n_calls, n_initial_points
 
-SYNTHESISE — REQUIRED FIELDS:
-  label: e.g. "Synthesise sample with <param>=<value>"
-  instrument: name of the synthesis instrument
-  params: dict of parameter name → value
+SYNTHESISE: label, instrument, params {dict}
+CHARACTERISE: label, sample_ref, conditions {dict}, measures
 
-CHARACTERISE — REQUIRED FIELDS:
-  label: e.g. "Characterise <sample_ref> at <condition>=<value>"
-  sample_ref: sample ID (e.g. "S-001") or "{{sample_id}}" if referencing a preceding synthesise step
-  conditions: dict of test conditions
-  measures: the output metric name
+RESULTS STORE (for generate_plot / analyse_data):
+  results_store[i] keys: condition_label, condition_value, optimiser_name,
+  param_names, X (param vectors), y (objective values), best_params, best_objective, failed_samples
+  Always use loops — never hardcode variable names from the task.
+  Always call print() for every computed value in analyse_data.
 
-RESULTS STORE STRUCTURE (for generate_plot and analyse_data):
-  results_store is a list of dicts. Each dict has:
-    condition_label (str), condition_value (float), optimiser_name (str),
-    param_names (list[str]), X (list of param vectors), y (list of objective floats),
-    best_params (dict), best_objective (float or None), failed_samples (int)
-  Access values as: results_store[0]["y"], results_store[0]["X"],
-    results_store[0]["best_objective"], results_store[0]["optimiser_name"]
-
-SAMPLE IDs: Each synthesised sample gets a unique ID (S-001, S-002, ...) persisted across the session.
-OPTIMISERS: Specify optimiser_name per optimise_condition step based on user's request.
-SAFETY: Respect any operating limits or safety constraints mentioned in equipment manuals or lab context.
-STYLE: Be precise, concise, and honest about uncertainty. Speak as a scientific collaborator.
+SAMPLE IDs: S-001, S-002, ... persisted across the session.
+OPTIMISERS: specify optimiser_name per step. Default: "gp_bo".
+SAFETY: Respect limits in equipment manuals and lab context.
+STYLE: Precise, concise, honest about uncertainty. Scientific collaborator.
 """
 
 
 def build_dynamic_system_prompt() -> str:
     from app.core.tool_registry import TOOL_REGISTRY
     from app.core.lab_config import get_lab_settings
-    from app.core.documents import get_all_library_context
+    from app.core.documents import DOCUMENTS
 
     settings = get_lab_settings()
 
-    opt_context = ""
-    if settings.optimisation_library:
-        enabled = [lib for lib in settings.optimisation_library if lib.enabled]
-        if enabled:
-            lines = ["\nAVAILABLE OPTIMISATION LIBRARIES:\n"]
-            for lib in enabled:
-                caps = ", ".join(lib.capabilities) if lib.capabilities else "general"
-                lines.append(f"- {lib.name}: {lib.description} [capabilities: {caps}]")
-            opt_context = "\n".join(lines)
-
+    # Lab context extension (user-defined, kept small)
     extension = ""
     if settings.system_prompt_extension.strip():
         extension = f"\n\nLAB CONTEXT:\n{settings.system_prompt_extension.strip()}"
 
-    library_context = get_all_library_context(max_chars_per_doc=800)
-    if library_context:
-        library_context = f"\n\n{library_context}"
+    # Optimisation library — names and capabilities only (not full descriptions)
+    opt_context = ""
+    if settings.optimisation_library:
+        enabled = [lib for lib in settings.optimisation_library if lib.enabled]
+        if enabled:
+            lines = ["\nAVAILABLE OPTIMISATION LIBRARIES:"]
+            for lib in enabled:
+                caps = ", ".join(lib.capabilities[:3]) if lib.capabilities else "general"
+                lines.append(f"  {lib.name} [{caps}]")
+            opt_context = "\n".join(lines)
+
+    # Document registry — titles only, not summaries
+    # Full content is retrieved on demand via retrieve_relevant_passages()
+    doc_registry = ""
+    if DOCUMENTS:
+        lines = ["\nKNOWLEDGE LIBRARY (query these documents for details):"]
+        for doc in DOCUMENTS.values():
+            meta = []
+            if doc.year:
+                meta.append(str(doc.year))
+            if doc.authors:
+                meta.append(doc.authors[0] + (" et al." if len(doc.authors) > 1 else ""))
+            meta_str = f" ({', '.join(meta)})" if meta else ""
+            lines.append(f"  [{doc.document_id[:8]}] {doc.title or doc.filename}{meta_str}")
+        doc_registry = "\n".join(lines)
 
     return (
         _BASE_SYSTEM_PROMPT
         + extension
         + opt_context
-        + library_context
+        + doc_registry
         + "\n\nREGISTERED INSTRUMENTS:\n"
         + TOOL_REGISTRY.to_llm_context()
         + "\nDATABASE SCHEMA:\n"
@@ -231,17 +214,12 @@ def build_tools_schema() -> list:
                 "name": "plan_workflow",
                 "description": (
                     "Propose a workflow plan for any task that involves using instruments. "
-                    "Includes single-step tasks, multi-step tasks, optimisation campaigns, "
-                    "and paper reproduction. The plan is shown to the user for review and "
-                    "approval before execution."
+                    "All steps in a single call. Plan is shown to user for approval."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "summary": {
-                            "type": "string",
-                            "description": "One-line summary of the proposed workflow",
-                        },
+                        "summary": {"type": "string"},
                         "steps": {
                             "type": "array",
                             "items": {
@@ -256,7 +234,7 @@ def build_tools_schema() -> list:
                                             "analyse_data",
                                         ],
                                     },
-                                    "label":            {"type": "string"},
+                                    "label":            {"type": "string", "description": "REQUIRED. Short human-readable label."},
                                     "instrument":       {"type": "string"},
                                     "params":           {"type": "object"},
                                     "produces":         {"type": "string"},
@@ -281,15 +259,7 @@ def build_tools_schema() -> list:
                                     "objective_metric": {"type": "string"},
                                     "optimiser_name": {
                                         "type": "string",
-                                        "description": (
-                                            "Optimiser key for optimise_condition steps. "
-                                            "Options: 'gp_bo' (GP Bayesian Optimisation, default), "
-                                            "'random' (Random Search), "
-                                            "'optuna' (Optuna TPE, requires pip install optuna), "
-                                            "'honegumi' (Ax Platform, requires pip install ax-platform honegumi), "
-                                            "'deap' (Evolutionary, requires pip install deap). "
-                                            "Use the key that matches the user's requested library."
-                                        ),
+                                        "description": "gp_bo | random | optuna | honegumi | deap",
                                     },
                                     "n_calls":          {"type": "integer"},
                                     "n_initial_points": {"type": "integer"},
@@ -310,18 +280,11 @@ def build_tools_schema() -> list:
             "type": "function",
             "function": {
                 "name": "extract_and_check_feasibility",
-                "description": (
-                    "Extract an experimental campaign from an uploaded paper and check "
-                    "whether the registered instruments can execute it. "
-                    "After extraction, automatically present the campaign as a workflow plan."
-                ),
+                "description": "Extract an experimental campaign from an uploaded paper and check feasibility.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "case_name": {
-                            "type": "string",
-                            "description": "The specific case study to extract",
-                        },
+                        "case_name": {"type": "string", "description": "The specific case study to extract"},
                     },
                     "required": ["case_name"],
                 },
@@ -331,7 +294,7 @@ def build_tools_schema() -> list:
             "type": "function",
             "function": {
                 "name": "list_samples",
-                "description": "List all samples in the lab inventory.",
+                "description": "List all samples in the lab sample inventory (synthesised and characterised samples).",
                 "parameters": {"type": "object", "properties": {}},
             },
         },
@@ -339,31 +302,16 @@ def build_tools_schema() -> list:
             "type": "function",
             "function": {
                 "name": "generate_plot",
-                        "description": (
-                            "Generate a matplotlib figure from experimental data. "
-                            "Write pure matplotlib code — no imports, no plt.savefig(). "
-                            "\n\nCRITICAL RULES FOR PLOT CODE:"
-                            "\n- NEVER hardcode variable names derived from the task (e.g. best_obj_90w_gpbo)."
-                            "\n- ALWAYS iterate over results_store dynamically using loops."
-                            "\n- ALWAYS check that results_store is non-empty before accessing elements."
-                            "\n\nAvailable variables:"
-                            "\n  results_store: list of dicts, each with keys:"
-                            "\n    condition_label (str), condition_value (float), optimiser_name (str),"
-                            "\n    param_names (list[str]),"
-                            "\n    X (list of param vectors e.g. [[93.1, 35.2], ...]),"
-                            "\n    y (list of objective floats e.g. [104.4, 98.5, ...]),"
-                            "\n    best_params (dict), best_objective (float or None),"
-                            "\n    failed_samples (int)"
-                            "\n  sample_registry: list of sample dicts"
-                            "\n\nCORRECT pattern — always use loops:"
-                            "\n  for r in results_store:"
-                            "\n      cond  = r['condition_value']"
-                            "\n      opt   = r.get('optimiser_name', '')"
-                            "\n      best  = r.get('best_objective')"
-                            "\n      label = f'{r[\"condition_label\"]}={cond} [{opt}]'"
-                            "\n\nWRONG pattern — never do this:"
-                            "\n  best_obj_90_gpbo = ...  # hardcoded name — will crash"
-                        ),
+                "description": (
+                    "Generate a matplotlib figure from experimental data. "
+                    "Write pure matplotlib code — no imports, no plt.savefig().\n"
+                    "CRITICAL: NEVER hardcode variable names from the task. ALWAYS use loops over results_store.\n"
+                    "Available: results_store (list of dicts with keys: condition_label, condition_value, "
+                    "optimiser_name, param_names, X, y, best_params, best_objective, failed_samples), "
+                    "sample_registry (list of sample dicts).\n"
+                    "CORRECT: for r in results_store: label = f\"{r['condition_label']}={r['condition_value']}\"\n"
+                    "WRONG: best_obj_90w = ...  # hardcoded — will crash"
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -379,15 +327,13 @@ def build_tools_schema() -> list:
             "function": {
                 "name": "analyse_data",
                 "description": (
-                    "Run statistical analysis using numpy/scipy. "
-                    "Print results to stdout — they appear in the chat.\n"
-                    "Available variables:\n"
-                    "  results_store: list of dicts with keys:\n"
-                    "    condition_label, condition_value, param_names,\n"
-                    "    X (param vectors), y (objective values),\n"
-                    "    best_params, best_objective, failed_samples\n"
-                    "  sample_registry: list of sample dicts\n"
-                    "Example: y_vals = results_store[0]['y'] if results_store else []"
+                    "Run statistical analysis using numpy/scipy. Print ALL results with print().\n"
+                    "CRITICAL: Every computed value MUST be printed — silent code produces blank output.\n"
+                    "Available: results_store (list of dicts with keys: condition_label, condition_value, "
+                    "optimiser_name, param_names, X, y, best_params, best_objective, failed_samples), "
+                    "sample_registry.\n"
+                    "CORRECT: for r in results_store: print(f\"{r['condition_label']}={r['condition_value']}: best={r.get('best_objective')}\")\n"
+                    "WRONG: best = results_store[0]['best_objective']  # computed but not printed"
                 ),
                 "parameters": {
                     "type": "object",
@@ -404,8 +350,11 @@ def build_tools_schema() -> list:
             "function": {
                 "name": "query_database",
                 "description": (
-                    "Run a read-only SQL SELECT query against the experimental results database. "
-                    "Only call when experiments have been run."
+                    "Run a read-only SQL SELECT query. Use for:\n"
+                    "  - Experimental results: SELECT * FROM evaluations\n"
+                    "  - Resource/consumable inventory: SELECT * FROM resources\n"
+                    "  - Past protocols/history: SELECT * FROM protocols\n"
+                    "Only SELECT statements are permitted."
                 ),
                 "parameters": {
                     "type": "object",
@@ -426,9 +375,9 @@ def build_lab_context_message(session) -> dict:
     from datetime import datetime
     import re
 
-    now      = datetime.now()
-    hour     = now.hour
-    time_str = now.strftime("%A, %d %B %Y %H:%M:%S")
+    now       = datetime.now()
+    hour      = now.hour
+    time_str  = now.strftime("%A, %d %B %Y %H:%M:%S")
     is_office = 9 <= hour < 17
     office_note = "office hours" if is_office else "outside office hours"
 
@@ -441,57 +390,34 @@ def build_lab_context_message(session) -> dict:
         campaign_text = (
             f" | ACTIVE CAMPAIGN: '{c.title}' "
             f"(objective: {c.objective_metric}, "
-            f"params: {[p['name'] for p in c.parameter_space]}, "
-            f"status: {c.status})"
+            f"params: {[p['name'] for p in c.parameter_space]})"
         )
 
+    # Active document context — section TOC only when a document is loaded
     doc_context_text = ""
     if session.active_document_id:
         try:
             doc = get_document(session.active_document_id)
-
             meta_lines = []
             if doc.authors:
-                meta_lines.append(f"Authors: {', '.join(doc.authors)}")
+                meta_lines.append(f"Authors: {', '.join(doc.authors[:3])}")
             if doc.year:
                 meta_lines.append(f"Year: {doc.year}")
             if doc.doi:
                 meta_lines.append(f"DOI: {doc.doi}")
-            if doc.journal:
-                meta_lines.append(f"Journal: {doc.journal}")
 
             section_toc = ""
             if doc.sections:
                 toc_lines = [f"\nSections ({len(doc.sections)}):"]
-                for i, s in enumerate(doc.sections[:30]):
-                    indent  = "  " * min(s.level - 1, 3)
-                    preview = f" — {s.content[:80].strip()}..." if s.content and len(s.content) > 20 else ""
-                    toc_lines.append(f"  {indent}{i + 1}. {s.heading}{preview}")
+                for i, s in enumerate(doc.sections[:20]):
+                    indent  = "  " * min(s.level - 1, 2)
+                    toc_lines.append(f"  {indent}{i + 1}. {s.heading}")
                 section_toc = "\n".join(toc_lines)
 
-            table_summary = ""
-            if doc.tables:
-                table_lines = [f"\nTables ({len(doc.tables)}):"]
-                for tbl in doc.tables[:4]:
-                    cap = tbl.caption[:80] if tbl.caption else "No caption"
-                    table_lines.append(f"  {cap}")
-                table_summary = "\n".join(table_lines)
-
-            figure_summary = ""
-            if doc.figures:
-                figure_lines = [f"\nFigures ({len(doc.figures)}):"]
-                for fig in doc.figures[:6]:
-                    cap = fig.caption[:60] if fig.caption else "No caption"
-                    figure_lines.append(f"  ID={fig.figure_id} | Page {fig.page_idx + 1} | {cap}")
-                figure_summary = "\n".join(figure_lines)
-
             doc_context_text = (
-                f"\nACTIVE DOCUMENT: {doc.filename}"
-                f"\nTitle: {doc.title or 'Unknown'}"
+                f"\nACTIVE DOCUMENT: {doc.title or doc.filename}"
                 + ("\n" + "\n".join(meta_lines) if meta_lines else "")
-                + f"\nSections: {len(doc.sections)} | Figures: {len(doc.figures)} | Tables: {len(doc.tables)}"
-                + table_summary
-                + figure_summary
+                + f"\n{len(doc.sections)} sections | {len(doc.figures)} figures | {len(doc.tables)} tables"
                 + section_toc
             )
         except Exception:
@@ -502,7 +428,7 @@ def build_lab_context_message(session) -> dict:
         "content": (
             f"[LAB STATE] "
             f"Time: {time_str} ({office_note}) | "
-            f"Evaluations collected: {total_evals} | "
+            f"Evaluations: {total_evals} | "
             f"Lab: {tool_summary}"
             f"{campaign_text}"
             f"{doc_context_text}"

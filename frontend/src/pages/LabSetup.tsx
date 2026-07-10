@@ -9,9 +9,10 @@ import {
 import type {
   VirtualInstrument, LabSettings,
   OptimisationLibraryEntry, DocumentLibraryEntry,
+  LabResource, ProtocolEntry,
 } from "@/types";
 
-type Tab = "instruments" | "optimisation" | "library" | "settings";
+type Tab = "instruments" | "optimisation" | "library" | "resources" | "settings";
 
 export function LabSetup() {
   const [tab, setTab] = useState<Tab>("instruments");
@@ -20,6 +21,7 @@ export function LabSetup() {
     { id: "instruments",  label: "Instruments"  },
     { id: "optimisation", label: "Optimisation" },
     { id: "library",      label: "Library"      },
+    { id: "resources",    label: "Resources"    },
     { id: "settings",     label: "Settings"     },
   ];
 
@@ -53,6 +55,7 @@ export function LabSetup() {
         {tab === "instruments"  && <InstrumentsTab />}
         {tab === "optimisation" && <OptimisationTab />}
         {tab === "library"      && <LibraryTab />}
+        {tab === "resources"    && <ResourcesTab />}
         {tab === "settings"     && <SettingsTab />}
       </div>
     </div>
@@ -688,6 +691,8 @@ function LibraryTab() {
         onRemove={handleRemove}
         emptyMessage="No manuals uploaded. Upload instrument manuals for MAESTRO to reference safety limits."
       />
+
+      <ProtocolsSection />
     </div>
   );
 }
@@ -850,6 +855,592 @@ function SettingsTab() {
                   <Save size={12} />}
         {saving ? "Saving..." : saved ? "Saved!" : "Save settings"}
       </button>
+    </div>
+  );
+}
+
+
+// ── Resources Tab ─────────────────────────────────────────────────────────────
+
+function ResourcesTab() {
+  const [resources, setResources] = useState<LabResource[]>([]);
+  const [loading,   setLoading]   = useState(true);
+  const [showForm,  setShowForm]  = useState(false);
+
+  useEffect(() => {
+    api.listResources().then((res) => {
+      setResources(res.resources);
+      setLoading(false);
+    });
+  }, []);
+
+  const handleDelete = async (resourceId: string) => {
+    await api.deleteResource(resourceId);
+    setResources((prev) => prev.filter((r) => r.resource_id !== resourceId));
+  };
+
+  const handleStockUpdate = async (resourceId: string, delta: number) => {
+    const resource = resources.find((r) => r.resource_id === resourceId);
+    if (!resource) return;
+    const newStock = Math.max(0, resource.current_stock + delta);
+    const updated  = await api.updateResource(resourceId, { current_stock: newStock });
+    setResources((prev) =>
+      prev.map((r) => r.resource_id === resourceId ? updated.resource : r)
+    );
+  };
+
+  const handleSaved = (resource: LabResource) => {
+    setResources((prev) => {
+      const idx = prev.findIndex((r) => r.resource_id === resource.resource_id);
+      if (idx >= 0) {
+        const next = [...prev]; next[idx] = resource; return next;
+      }
+      return [...prev, resource];
+    });
+    setShowForm(false);
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-slate-400">
+        <Loader2 size={14} className="animate-spin" /> Loading resources...
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6 max-w-3xl">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700 mb-1">Consumables inventory</h3>
+        <p className="text-xs text-slate-500 mb-4">
+          Track lab consumables (chemicals, cell casings, substrates, etc.) and define
+          how much each instrument consumes per operation. MAESTRO will deduct stock
+          automatically and alert you when supplies run low.
+        </p>
+
+        <div className="flex justify-end mb-3">
+          <button
+            onClick={() => setShowForm(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors"
+          >
+            <Plus size={12} /> Add Resource
+          </button>
+        </div>
+
+        {resources.length === 0 ? (
+          <div className="glass-panel p-8 text-center text-slate-400 text-xs">
+            No resources registered. Add consumables to track inventory.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {resources.map((r) => {
+              const isLow = r.min_stock > 0 && r.current_stock <= r.min_stock;
+              return (
+                <div key={r.resource_id} className={cn(
+                  "glass-panel p-4 space-y-3",
+                  isLow && "border-amber-300 border"
+                )}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-slate-800">{r.name}</span>
+                        {isLow && (
+                          <span className="text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded font-medium">
+                            Low stock
+                          </span>
+                        )}
+                      </div>
+                      {r.description && (
+                        <p className="text-xs text-slate-500 mt-0.5">{r.description}</p>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => handleDelete(r.resource_id)}
+                      className="text-slate-400 hover:text-red-500 transition-colors p-1 shrink-0"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+
+                  {/* Stock level */}
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1">
+                      <div className="flex justify-between text-[10px] text-slate-500 mb-1">
+                        <span>Current stock</span>
+                        <span className={isLow ? "text-amber-600 font-semibold" : ""}>
+                          {r.current_stock.toFixed(1)} {r.unit}
+                          {r.min_stock > 0 && ` (min: ${r.min_stock} ${r.unit})`}
+                        </span>
+                      </div>
+                      {r.min_stock > 0 && (
+                        <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                          <div
+                            className={cn(
+                              "h-full rounded-full transition-all",
+                              isLow ? "bg-amber-400" : "bg-green-500"
+                            )}
+                            style={{
+                              width: `${Math.min(100, (r.current_stock / (r.min_stock * 5)) * 100)}%`,
+                            }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                    {/* Quick stock adjustment */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => handleStockUpdate(r.resource_id, -1)}
+                        className="w-6 h-6 rounded bg-slate-100 text-slate-600 hover:bg-slate-200 text-xs font-bold transition-colors"
+                        title="Remove 1 unit"
+                      >−</button>
+                      <button
+                        onClick={() => handleStockUpdate(r.resource_id, 10)}
+                        className="px-2 h-6 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 text-xs font-medium transition-colors"
+                        title="Add 10 units"
+                      >+10</button>
+                    </div>
+                  </div>
+
+                  {/* Consumption rules */}
+                  {r.consumption_rules.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+                        Consumed by
+                      </div>
+                      {r.consumption_rules.map((rule, i) => (
+                        <div key={i} className="flex justify-between text-xs text-slate-500">
+                          <span>{rule.instrument_name}</span>
+                          <span className="font-mono text-slate-400">
+                            {rule.amount_per_use} {r.unit} / use
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {showForm && (
+          <ResourceForm
+            onSaved={handleSaved}
+            onCancel={() => setShowForm(false)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ResourceForm({
+  onSaved,
+  onCancel,
+}: {
+  onSaved:  (r: LabResource) => void;
+  onCancel: () => void;
+}) {
+  const [name,        setName]        = useState("");
+  const [unit,        setUnit]        = useState("");
+  const [stock,       setStock]       = useState("0");
+  const [minStock,    setMinStock]    = useState("0");
+  const [description, setDescription] = useState("");
+  const [rules,       setRules]       = useState<
+    Array<{ instrument_name: string; amount_per_use: string; description: string }>
+  >([]);
+  const [saving, setSaving] = useState(false);
+
+  const addRule = () =>
+    setRules((r) => [...r, { instrument_name: "", amount_per_use: "1", description: "" }]);
+
+  const updateRule = (i: number, field: string, val: string) =>
+    setRules((r) => r.map((x, j) => j === i ? { ...x, [field]: val } : x));
+
+  const handleSave = async () => {
+    if (!name.trim() || !unit.trim()) return;
+    setSaving(true);
+    try {
+      const result = await api.addResource({
+        name,
+        unit,
+        current_stock: parseFloat(stock) || 0,
+        min_stock:     parseFloat(minStock) || 0,
+        description,
+        consumption_rules: rules
+          .filter((r) => r.instrument_name.trim())
+          .map((r) => ({
+            instrument_name: r.instrument_name.trim(),
+            amount_per_use:  parseFloat(r.amount_per_use) || 1,
+            description:     r.description,
+          })),
+      });
+      onSaved(result.resource);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputCls = cn(
+    "w-full rounded-md px-2 py-1.5 text-xs",
+    "bg-white border border-slate-300 text-slate-800",
+    "focus:outline-none focus:border-blue-400",
+  );
+
+  return (
+    <div className="glass-panel p-5 space-y-4 border-blue-200 border mt-4">
+      <h3 className="text-sm font-semibold text-slate-700">Add Resource</h3>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">Name</label>
+          <input
+            className={inputCls}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. NMC Slurry, Coin Cell Casing"
+          />
+        </div>
+        <div>
+          <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">Unit</label>
+          <input
+            className={inputCls}
+            value={unit}
+            onChange={(e) => setUnit(e.target.value)}
+            placeholder="e.g. mL, units, g"
+          />
+        </div>
+        <div>
+          <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+            Current stock
+          </label>
+          <input
+            className={inputCls}
+            type="number"
+            value={stock}
+            onChange={(e) => setStock(e.target.value)}
+            min="0" step="0.1"
+          />
+        </div>
+        <div>
+          <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+            Minimum stock (alert threshold)
+          </label>
+          <input
+            className={inputCls}
+            type="number"
+            value={minStock}
+            onChange={(e) => setMinStock(e.target.value)}
+            min="0" step="0.1"
+          />
+        </div>
+      </div>
+
+      <div>
+        <label className="text-[10px] text-slate-500 uppercase tracking-wider block mb-1">
+          Description
+        </label>
+        <input
+          className={inputCls}
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="e.g. NMC cathode slurry for electrode coating"
+        />
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label className="text-[10px] text-slate-500 uppercase tracking-wider">
+            Consumption rules
+          </label>
+          <button onClick={addRule} className="text-[10px] text-blue-600 hover:underline">
+            + Add rule
+          </button>
+        </div>
+        <p className="text-[10px] text-slate-400 mb-2">
+          Define how much of this resource each instrument consumes per operation.
+          MAESTRO will deduct stock automatically when that instrument is used.
+        </p>
+        {rules.map((rule, i) => (
+          <div key={i} className="grid grid-cols-3 gap-1.5 mb-1.5">
+            <input
+              className={inputCls}
+              placeholder="Instrument name"
+              value={rule.instrument_name}
+              onChange={(e) => updateRule(i, "instrument_name", e.target.value)}
+            />
+            <input
+              className={inputCls}
+              placeholder={`Amount per use (${unit || "units"})`}
+              type="number"
+              value={rule.amount_per_use}
+              onChange={(e) => updateRule(i, "amount_per_use", e.target.value)}
+              min="0" step="0.1"
+            />
+            <button
+              onClick={() => setRules((r) => r.filter((_, j) => j !== i))}
+              className="text-red-400 hover:text-red-600 text-xs"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex gap-2">
+        <button
+          onClick={handleSave}
+          disabled={saving || !name.trim() || !unit.trim()}
+          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors disabled:opacity-50"
+        >
+          {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+          {saving ? "Saving..." : "Save Resource"}
+        </button>
+        <button
+          onClick={onCancel}
+          className="px-4 py-2 rounded-lg border border-slate-300 text-slate-600 text-xs font-medium hover:bg-slate-50 transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
+// ── Protocols Section ────────────────────────────────────
+
+function ProtocolsSection() {
+  const state     = useMaestroStore((s) => s.state);
+  const sessionId = useMaestroStore((s) => s.sessionId);
+
+  const [protocols, setProtocols] = useState<ProtocolEntry[]>([]);
+  const [loading,   setLoading]   = useState(true);
+  const [showSave,  setShowSave]  = useState(false);
+  const [saveName,  setSaveName]  = useState("");
+  const [saveDesc,  setSaveDesc]  = useState("");
+  const [saveNotes, setSaveNotes] = useState("");
+  const [saving,    setSaving]    = useState(false);
+
+  useEffect(() => {
+    api.listProtocols().then((res) => {
+      setProtocols(res.protocols);
+      setLoading(false);
+    });
+  }, []);
+
+  const handleSaveProtocol = async () => {
+    if (!saveName.trim()) return;
+    setSaving(true);
+    try {
+      const userInstructions = (state?.messages ?? [])
+        .filter((m) => m.role === "user")
+        .map((m) => m.content)
+        .slice(-10);
+
+      const workflowPlan = state?.background_job_plan?.length
+        ? { steps: state.background_job_plan, summary: "Captured workflow" }
+        : null;
+
+      const results = state?.results_store ?? [];
+      const resultsSummary = results.length > 0
+        ? results.map((r) =>
+            `${r.condition_label}=${r.condition_value}` +
+            (r.optimiser_name ? ` [${r.optimiser_name}]` : "") +
+            `: best=${r.best_objective !== null ? r.best_objective.toFixed(4) : "N/A"}` +
+            `, n=${r.X.length}`
+          ).join("; ")
+        : "No results recorded";
+
+      const optimiserUsed = [
+        ...new Set(results.map((r) => r.optimiser_name || "").filter(Boolean)),
+      ].join(", ");
+
+      const result = await api.saveProtocol({
+        name:              saveName,
+        description:       saveDesc,
+        notes:             saveNotes,
+        user_instructions: userInstructions,
+        workflow_plan:     workflowPlan as Record<string, unknown> | null,
+        results_summary:   resultsSummary,
+        optimiser_used:    optimiserUsed,
+        tags:              [],
+      });
+      setProtocols((prev) => [...prev, result.protocol]);
+      setShowSave(false);
+      setSaveName(""); setSaveDesc(""); setSaveNotes("");
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (protocolId: string) => {
+    await api.deleteProtocol(protocolId);
+    setProtocols((prev) => prev.filter((p) => p.protocol_id !== protocolId));
+  };
+
+  const handleLoadToChat = (protocol: ProtocolEntry) => {
+    const prompt = [
+      `[Replaying protocol: "${protocol.name}"]`,
+      ``,
+      `Previous instructions from this protocol:`,
+      ...protocol.user_instructions.map((instr, i) => `${i + 1}. ${instr}`),
+      ``,
+      `Please replay this workflow. You may modify parameters, optimiser, or conditions as needed.`,
+    ].join("\n");
+    navigator.clipboard.writeText(prompt).then(() => {
+      alert(
+        `Protocol context copied to clipboard.\n\nPaste it into the chat on the Dashboard to replay or adapt this workflow.`
+      );
+    });
+  };
+
+  const inputCls = cn(
+    "w-full rounded-md px-2 py-1.5 text-xs",
+    "bg-white border border-slate-300 text-slate-800",
+    "focus:outline-none focus:border-blue-400",
+  );
+
+  return (
+    <div className="mt-8 border-t border-slate-100 pt-6">
+      <div className="flex items-center gap-2 mb-3">
+        <span>📋</span>
+        <h3 className="text-sm font-semibold text-slate-700">Protocols</h3>
+        <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
+          {protocols.length}
+        </span>
+      </div>
+
+      <p className="text-xs text-slate-500 mb-4">
+        Save the current session as a reusable protocol — a reproducible record of the
+        instructions and workflow that MAESTRO executed. Another scientist can load a
+        protocol into the chat to replay or adapt the same experimental sequence.
+      </p>
+
+      {/* Save current session */}
+      {sessionId && (
+        <button
+          onClick={() => setShowSave(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors mb-4"
+        >
+          <Save size={12} /> Save current session as protocol
+        </button>
+      )}
+
+      {showSave && (
+        <div className="glass-panel p-4 space-y-3 border-blue-200 border mb-4">
+          <h4 className="text-sm font-semibold text-slate-700">Save protocol</h4>
+          <input
+            className={inputCls}
+            placeholder="Protocol name (e.g. GP-BO cathode optimisation — week 1)"
+            value={saveName}
+            onChange={(e) => setSaveName(e.target.value)}
+          />
+          <input
+            className={inputCls}
+            placeholder="Description (optional)"
+            value={saveDesc}
+            onChange={(e) => setSaveDesc(e.target.value)}
+          />
+          <textarea
+            className={cn(inputCls, "resize-none")}
+            rows={2}
+            placeholder="Notes (e.g. conditions used, observations, suggested next steps)"
+            value={saveNotes}
+            onChange={(e) => setSaveNotes(e.target.value)}
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={handleSaveProtocol}
+              disabled={saving || !saveName.trim()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors disabled:opacity-50"
+            >
+              {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+              {saving ? "Saving..." : "Save"}
+            </button>
+            <button
+              onClick={() => { setShowSave(false); setSaveName(""); setSaveDesc(""); setSaveNotes(""); }}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs hover:bg-slate-50 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center gap-2 text-slate-400 text-xs">
+          <Loader2 size={14} className="animate-spin" /> Loading protocols...
+        </div>
+      ) : protocols.length === 0 ? (
+        <div className="glass-panel p-4 text-center text-slate-400 text-xs">
+          No protocols saved yet. Run an experiment and save it as a protocol above.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {protocols.map((p) => (
+            <div key={p.protocol_id} className="glass-panel px-4 py-3 space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-slate-700">{p.name}</div>
+                  {p.description && (
+                    <div className="text-xs text-slate-500 mt-0.5">{p.description}</div>
+                  )}
+                  <div className="text-[10px] text-slate-400 mt-1 space-y-0.5">
+                    {p.created_at && (
+                      <div>Saved: {new Date(p.created_at).toLocaleString()}</div>
+                    )}
+                    {p.optimiser_used && (
+                      <div>Optimiser: <span className="text-blue-600">{p.optimiser_used}</span></div>
+                    )}
+                    {p.results_summary && (
+                      <div className="text-green-600 font-medium">{p.results_summary}</div>
+                    )}
+                    {p.notes && (
+                      <div className="italic text-slate-400">{p.notes}</div>
+                    )}
+                  </div>
+
+                  {p.user_instructions.length > 0 && (
+                    <details className="mt-2">
+                      <summary className="text-[10px] text-blue-600 cursor-pointer hover:underline">
+                        View {p.user_instructions.length} instruction(s)
+                      </summary>
+                      <div className="mt-1 space-y-0.5 pl-2 border-l border-slate-200">
+                        {p.user_instructions.map((instr, i) => (
+                          <div key={i} className="text-[10px] text-slate-500">
+                            {i + 1}. {instr}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => handleLoadToChat(p)}
+                    className="text-[10px] text-blue-600 hover:underline px-2 py-1 rounded hover:bg-blue-50 transition-colors"
+                    title="Copy protocol context to clipboard for chat replay"
+                  >
+                    Load ↗
+                  </button>
+                  <button
+                    onClick={() => handleDelete(p.protocol_id)}
+                    className="text-slate-400 hover:text-red-500 transition-colors p-1"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -326,10 +326,48 @@ export interface OptimisationLibraryEntry {
   is_default:   boolean;
 }
 
+// ── Resource Inventory ────────────────────────────────────────────────────────
+
+export interface ResourceConsumptionRule {
+  instrument_name: string;
+  amount_per_use:  number;
+  description:     string;
+}
+
+export interface LabResource {
+  resource_id:       string;
+  name:              string;
+  unit:              string;
+  current_stock:     number;
+  min_stock:         number;
+  description:       string;
+  consumption_rules: ResourceConsumptionRule[];
+}
+
+// ── Protocols ─────────────────────────────────────────────────────────────────
+
+export interface ProtocolEntry {
+  protocol_id:        string;
+  name:               string;
+  description:        string;
+  created_at:         string;
+  created_by:         string;
+  tags:               string[];
+  user_instructions:  string[];
+  workflow_plan:      Record<string, unknown> | null;
+  results_summary:    string;
+  optimiser_used:     string;
+  notes:              string;
+}
+
+// ── Lab Settings ──────────────────────────────────────────────────────────────
+
 export interface LabSettings {
   lab_name:                string;
   lab_description:         string;
   system_prompt_extension: string;
   document_library:        DocumentLibraryEntry[];
   optimisation_library:    OptimisationLibraryEntry[];
+  resource_inventory:      LabResource[];
+  protocols:               ProtocolEntry[];
 }
