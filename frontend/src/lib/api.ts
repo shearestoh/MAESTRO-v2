@@ -26,9 +26,7 @@ async function request<T>(path: string, opts?: RequestInit): Promise<T> {
 async function downloadFile(response: Response, filename: string): Promise<void> {
   const blob = await response.blob();
   const url  = URL.createObjectURL(blob);
-  const a    = document.createElement("a");
-  a.href     = url;
-  a.download = filename;
+  const a    = Object.assign(document.createElement("a"), { href: url, download: filename });
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -119,7 +117,8 @@ export const api = {
   deleteTool: (toolId: string) =>
     request<{ status: string }>(`/tools/${toolId}`, { method: "DELETE" }),
 
-  buildPlotUrl: (sessionId: string) => `${BASE}/plot/${sessionId}`,
+  // Consistent name used by Visualisation.tsx
+  getPlotUrl: (sessionId: string) => `${BASE}/plot/${sessionId}`,
 
   exportResultsCsv: async (sessionId: string) => {
     const res = await fetch(`${BASE}/export/results-csv/${sessionId}`, { method: "POST" });

@@ -6,7 +6,6 @@ const BASE_RECONNECT_DELAY = 1_000;
 const MAX_RECONNECT_DELAY  = 30_000;
 const MAX_RECONNECTS       = 12;
 
-// Events that should trigger a state refresh
 const REFRESH_EVENT_TYPES = new Set([
   "job_complete",
   "optimiser_complete",
@@ -30,11 +29,16 @@ export function useWebSocket() {
   const timerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted    = useRef(true);
 
+  // Stable connect function — reads sessionId from ref to avoid stale closure
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
+
   const connect = useCallback(() => {
-    if (!sessionId || !mounted.current) return;
+    const sid = sessionIdRef.current;
+    if (!sid || !mounted.current) return;
 
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const url      = `${protocol}://${window.location.host}/ws/${sessionId}`;
+    const url      = `${protocol}://${window.location.host}/ws/${sid}`;
     const ws       = new WebSocket(url);
     wsRef.current  = ws;
 
@@ -47,7 +51,6 @@ export function useWebSocket() {
       try {
         const event = JSON.parse(ev.data as string) as WsEvent;
 
-        // Silently ignore ping keepalives
         if (event.event_type === "ping") return;
 
         if (event.event_type === "state_update") {
@@ -88,15 +91,23 @@ export function useWebSocket() {
     };
 
     ws.onerror = () => ws.close();
-  }, [sessionId, pushWsEvent, setConnected, refreshState]);
+  }, [pushWsEvent, setConnected, refreshState]); // sessionId read via ref — no stale closure
 
+  // Re-connect whenever sessionId becomes available or changes
   useEffect(() => {
+    if (!sessionId) return;
     mounted.current = true;
+    // Close any existing connection before opening a new one
+    if (wsRef.current) {
+      wsRef.current.onclose = null; // prevent reconnect loop on intentional close
+      wsRef.current.close();
+    }
+    reconnects.current = 0;
     connect();
     return () => {
       mounted.current = false;
       if (timerRef.current) clearTimeout(timerRef.current);
       wsRef.current?.close();
     };
-  }, [connect]);
+  }, [sessionId, connect]);
 }

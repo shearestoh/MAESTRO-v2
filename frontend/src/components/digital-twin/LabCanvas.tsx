@@ -22,7 +22,6 @@ const INITIAL_EDGES: Edge[] = [
   { id: "e-t-mem", source: "characteriser", target: "memory"        },
 ];
 
-// Node definitions are static — only `active` and `status` change at runtime.
 const NODE_DEFS: Array<{
   id:    string;
   label: string;
@@ -87,8 +86,10 @@ function LabCanvasInner() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(buildEdges(eq));
 
-  // Derive a stable change key — only update when an equipment flag actually changes
-  const eqKey = Object.values(eq).map(Number).join("");
+  // Stable change key — only re-render when a flag actually flips
+  const eqKey = NODE_DEFS.map(({ eqKey }) =>
+    eqKey === "llm" ? Number(eq.llm) : Number(eq[eqKey as keyof EquipmentStatus])
+  ).join("");
 
   useEffect(() => {
     setNodes(buildNodes(eq));

@@ -6,46 +6,6 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-def append_assistant_message(messages: list, content: str, tool_calls: list | None = None) -> dict:
-    entry: dict = {"role": "assistant", "content": content or ""}
-    if tool_calls:
-        entry["tool_calls"] = tool_calls
-    messages.append(entry)
-    return entry
-
-
-def append_tool_response(messages: list, tool_call_id: str, name: str, content: str) -> bool:
-    for msg in reversed(messages):
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            ids = {tc.get("id") for tc in msg["tool_calls"]}
-            if tool_call_id in ids:
-                messages.append({
-                    "role":         "tool",
-                    "tool_call_id": tool_call_id,
-                    "name":         name,
-                    "content":      content,
-                })
-                return True
-        if msg.get("role") == "tool":
-            continue
-    return False
-
-
-def get_unanswered_tool_calls(messages: list) -> list[dict]:
-    responded: set[str] = {
-        msg["tool_call_id"]
-        for msg in messages
-        if msg.get("role") == "tool" and msg.get("tool_call_id")
-    }
-    unanswered = []
-    for msg in messages:
-        if msg.get("role") == "assistant":
-            for tc in msg.get("tool_calls", []):
-                if tc.get("id") and tc["id"] not in responded:
-                    unanswered.append(tc)
-    return unanswered
-
-
 # ── Document structure ────────────────────────────────────────────────────────
 
 class FigureModel(BaseModel):
@@ -202,7 +162,7 @@ class Sample(BaseModel):
     failure_reason: Optional[str] = None
     notes:          str = ""
     results:        List[SampleResult] = Field(default_factory=list)
-    tags:           List[str] = Field(default_factory=list)
+    tags:           List[str]          = Field(default_factory=list)
 
 
 def generate_sample_id(session: "SessionModel") -> str:
@@ -349,32 +309,32 @@ class ArtifactModel(BaseModel):
 # ── Session ───────────────────────────────────────────────────────────────────
 
 class SessionModel(BaseModel):
-    session_id:             str
-    agent_state:            AgentStateModel
-    outstanding_tasks:      List[dict] = Field(default_factory=list)
-    show_plotter_image:     Optional[str] = None
-    artifacts:              List[ArtifactModel] = Field(default_factory=list)
-    active_document_id:     Optional[str] = None
-    extracted_campaign:     Optional[CampaignSpec] = None
-    active_condition_key:   str = ""
-    sample_registry:        List[Sample] = Field(default_factory=list)
-    pending_plan:           Optional[WorkflowPlan] = None
-    optimiser_config:       OptimiserConfig = Field(default_factory=OptimiserConfig)
-    equipment_status:       EquipmentStatusModel = Field(default_factory=EquipmentStatusModel)
-    current_activity:       Optional[str] = None
-    activity_log:           List[str] = Field(default_factory=list)
-    current_mission:        Optional[str] = None
-    background_job_active:  bool = False
-    background_job_label:   Optional[str] = None
-    background_job_error:   Optional[str] = None
-    background_job_plan:    List[dict] = Field(default_factory=list)
-    background_job_index:   int = 0
-    background_job_status:  str = "idle"
-    step_statuses:          Dict[str, str] = Field(default_factory=dict)
-    bo_iteration_counts:    Dict[str, int] = Field(default_factory=dict)
-    projected_schedule:     List[ProjectedScheduleEntry] = Field(default_factory=list)
-    live_event_queue:       List[ExecutionEvent] = Field(default_factory=list)
-    resource_log:           List[dict] = Field(default_factory=list)
+    session_id:            str
+    agent_state:           AgentStateModel
+    outstanding_tasks:     List[dict] = Field(default_factory=list)
+    show_plotter_image:    Optional[str] = None
+    artifacts:             List[ArtifactModel] = Field(default_factory=list)
+    active_document_id:    Optional[str] = None
+    extracted_campaign:    Optional[CampaignSpec] = None
+    active_condition_key:  str = ""
+    sample_registry:       List[Sample] = Field(default_factory=list)
+    pending_plan:          Optional[WorkflowPlan] = None
+    optimiser_config:      OptimiserConfig = Field(default_factory=OptimiserConfig)
+    equipment_status:      EquipmentStatusModel = Field(default_factory=EquipmentStatusModel)
+    current_activity:      Optional[str] = None
+    activity_log:          List[str] = Field(default_factory=list)
+    current_mission:       Optional[str] = None
+    background_job_active: bool = False
+    background_job_label:  Optional[str] = None
+    background_job_error:  Optional[str] = None
+    background_job_plan:   List[dict] = Field(default_factory=list)
+    background_job_index:  int = 0
+    background_job_status: str = "idle"
+    step_statuses:         Dict[str, str] = Field(default_factory=dict)
+    bo_iteration_counts:   Dict[str, int] = Field(default_factory=dict)
+    projected_schedule:    List[ProjectedScheduleEntry] = Field(default_factory=list)
+    live_event_queue:      List[ExecutionEvent] = Field(default_factory=list)
+    resource_log:          List[dict] = Field(default_factory=list)
 
 
 # ── API shapes ────────────────────────────────────────────────────────────────

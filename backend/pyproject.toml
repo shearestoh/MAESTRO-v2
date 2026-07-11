@@ -19,11 +19,13 @@ dependencies = [
     "pypdf2>=3.0.0",
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
-    "mineru[core]>=3.4.0",
 ]
 
 [project.optional-dependencies]
-mineru = ["mineru>=3.4.0"]
+mineru  = ["mineru[core]>=3.4.0"]
+optuna  = ["optuna"]
+ax      = ["ax-platform", "honegumi"]
+deap    = ["deap"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

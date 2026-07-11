@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { useEffect }       from "react";
+import { useEffect } from "react";
 import { Sidebar }         from "@/components/layout/Sidebar";
 import { Dashboard }       from "@/pages/Dashboard";
 import { LabSetup }        from "@/pages/LabSetup";
@@ -43,7 +43,7 @@ function AppShell() {
         )}
         <main className="flex-1 min-h-0 overflow-hidden">
           <Routes>
-            <Route path="/"         index element={<Dashboard />} />
+            <Route index         element={<Dashboard />} />
             <Route path="/lab"      element={<LabSetup />} />
             <Route path="/notebook" element={<LabNotebook />} />
           </Routes>
@@ -63,7 +63,7 @@ export default function App() {
     loadLabSettings();
     loadInstruments();
   }, [initSession, loadLabSettings, loadInstruments]);
-  
+
   return (
     <BrowserRouter>
       <AppShell />

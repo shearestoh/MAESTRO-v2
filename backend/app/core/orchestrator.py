@@ -27,7 +27,7 @@ from app.core.tools import (
 SESSIONS:      Dict[str, SessionModel]   = {}
 SESSION_LOCKS: Dict[str, threading.Lock] = {}
 
-_INSTRUMENT_STEP_KINDS = {"synthesise", "characterise", "optimise_condition", "extract_feasibility"}
+_INSTRUMENT_STEP_KINDS     = {"synthesise", "characterise", "optimise_condition", "extract_feasibility"}
 _NON_INSTRUMENT_STEP_KINDS = {"list_samples", "generate_plot", "analyse_data", "query_database"}
 
 
@@ -46,7 +46,7 @@ def _welcome_message() -> dict:
             f"Welcome to **MAESTRO** — your agentic orchestrator for **{lab_name}**.\n\n"
             "You can:\n"
             "- Design and run experimental campaigns\n"
-            "- Upload papers and manuals to the Library for reference and reproduction\n"
+            "- Upload papers and manuals to the Library\n"
             "- Query and analyse your experimental results\n"
             "- Configure your lab via Lab Setup\n\n"
             "What would you like to explore today?"
@@ -57,10 +57,9 @@ def _welcome_message() -> dict:
 def create_session() -> SessionModel:
     ensure_db()
     session_id  = str(uuid.uuid4())
-    agent_state = AgentStateModel(messages=[_welcome_message()])
     session     = SessionModel(
         session_id=session_id,
-        agent_state=agent_state,
+        agent_state=AgentStateModel(messages=[_welcome_message()]),
         current_mission="Awaiting instruction.",
     )
     SESSIONS[session_id] = session
@@ -85,12 +84,10 @@ def _plan_requires_approval(plan: list) -> bool:
 
 
 def _append_tool_response(session: SessionModel, tool_call_id: str, name: str, content: str) -> None:
-    messages = session.agent_state.messages
-    for msg in reversed(messages):
+    for msg in reversed(session.agent_state.messages):
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            ids = {tc.get("id") for tc in msg["tool_calls"]}
-            if tool_call_id in ids:
-                messages.append({
+            if tool_call_id in {tc.get("id") for tc in msg["tool_calls"]}:
+                session.agent_state.messages.append({
                     "role":         "tool",
                     "tool_call_id": tool_call_id,
                     "name":         name,
@@ -99,7 +96,7 @@ def _append_tool_response(session: SessionModel, tool_call_id: str, name: str, c
                 return
         if msg.get("role") == "user":
             break
-    print(f"[WARN] Skipping orphaned tool response for tool_call_id={tool_call_id}, name={name}")
+    print(f"[WARN] Orphaned tool response: tool_call_id={tool_call_id}, name={name}")
 
 
 def post_user_message(session_id: str, text: str) -> SessionModel:
@@ -181,9 +178,7 @@ def _check_plan_feasibility(session: SessionModel, steps: list) -> str | None:
     if not required_params and not required_outputs:
         return None
 
-    feasibility = TOOL_REGISTRY.check_feasibility(
-        list(required_params), list(required_outputs)
-    )
+    feasibility = TOOL_REGISTRY.check_feasibility(list(required_params), list(required_outputs))
     if feasibility["feasible"]:
         return None
 
@@ -303,10 +298,7 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
             if tc["function"]["name"] == "plan_workflow":
                 _append_tool_response(
                     session, tc["id"], "plan_workflow",
-                    json.dumps({
-                        "status":  "pending_approval",
-                        "message": "Workflow plan presented to user for approval.",
-                    }),
+                    json.dumps({"status": "pending_approval", "message": "Workflow presented for approval."}),
                 )
 
 
@@ -338,14 +330,9 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
         {"status": "ok", "results": [r for _, r in tool_results]}, default=str
     )
     for tc in pending_calls:
-        _append_tool_response(
-            session, tc["id"], tc["function"]["name"], summary_result
-        )
+        _append_tool_response(session, tc["id"], tc["function"]["name"], summary_result)
 
-    needs_followup = any(
-        kind in ("query_database", "list_samples")
-        for kind, _ in tool_results
-    )
+    needs_followup = any(kind in ("query_database", "list_samples") for kind, _ in tool_results)
     if needs_followup:
         with lock:
             session.equipment_status.llm = True
@@ -462,9 +449,7 @@ def _normalise_step(s: dict, session: SessionModel) -> dict:
     s.setdefault("step_id", str(uuid.uuid4())[:8])
     s.setdefault("status", "pending")
     s.setdefault("dependencies", [])
-
-    raw_id = s.get("instrument_id") or s.get("instrument") or kind or "unknown"
-    s["instrument_id"] = str(raw_id)
+    s["instrument_id"] = str(s.get("instrument_id") or s.get("instrument") or kind or "unknown")
 
     if kind == "optimise_condition":
         s.setdefault("condition_label", "condition")
@@ -623,13 +608,13 @@ def _run_background_job(session_id: str) -> None:
 
     def mark_done(success: bool, error_msg: str = "") -> None:
         with lock:
-            session.background_job_active  = False
-            session.background_job_status  = "completed" if success else "failed"
-            session.background_job_label   = None
-            session.current_activity       = None
-            session.equipment_status       = EquipmentStatusModel()
-            session.pending_plan           = None
-            session.projected_schedule     = [] 
+            session.background_job_active = False
+            session.background_job_status = "completed" if success else "failed"
+            session.background_job_label  = None
+            session.current_activity      = None
+            session.equipment_status      = EquipmentStatusModel()
+            session.pending_plan          = None
+            # Keep projected_schedule intact so the Gantt shows actual vs projected
 
             if not success:
                 session.background_job_error = error_msg
@@ -642,10 +627,10 @@ def _run_background_job(session_id: str) -> None:
                     ),
                 })
             else:
-                results   = session.agent_state.results_store
-                n_evals   = sum(len(r.get("X", [])) for r in results)
-                n_fails   = sum(r.get("failed_samples", 0) for r in results)
-                best_obj  = max((r.get("best_objective") or 0.0 for r in results), default=0.0)
+                results  = session.agent_state.results_store
+                n_evals  = sum(len(r.get("X", [])) for r in results)
+                n_fails  = sum(r.get("failed_samples", 0) for r in results)
+                best_obj = max((r.get("best_objective") or 0.0 for r in results), default=0.0)
                 obj_label = (
                     session.extracted_campaign.objective_metric
                     if session.extracted_campaign else "objective"
@@ -688,7 +673,6 @@ def _run_background_job(session_id: str) -> None:
             ))
 
     try:
-        # Execute steps sequentially — preserves implicit ordering (synthesise before characterise)
         for step in session.background_job_plan:
             step_id = step.get("step_id", "")
 
@@ -732,10 +716,10 @@ def register_artifact(session: SessionModel, name: str, kind: str, path: str) ->
 
 def session_state_payload(session: SessionModel) -> dict:
     results   = session.agent_state.results_store
-    obj_label = "Objective"
-
-    if session.extracted_campaign:
-        obj_label = session.extracted_campaign.objective_metric or "Objective"
+    obj_label = (
+        session.extracted_campaign.objective_metric
+        if session.extracted_campaign else "Objective"
+    )
 
     return {
         "session_id":                 session.session_id,

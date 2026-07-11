@@ -1,19 +1,3 @@
-"""
-Instrument registry for MAESTRO.
-
-Instruments persist to SQLite and are loaded on startup.
-
-Categories:
-  physical      — lab hardware (synthesis, characterisation)
-  computational — algorithms and data tools
-
-To add a new instrument:
-  1. Via UI: Lab Setup → Instruments → Add Instrument (recommended)
-  2. Via code: call TOOL_REGISTRY.register(VirtualInstrument(...)) at startup
-
-For physical instruments, implement an adapter in backend/app/adapters/ and
-reference it in the instrument's `adapter` field.
-"""
 from __future__ import annotations
 
 import json
@@ -56,7 +40,6 @@ class VirtualInstrument(BaseModel):
     parameters:    List[InstrumentParameter]   = Field(default_factory=list)
     outputs:       List[InstrumentOutput]      = Field(default_factory=list)
     failure_modes: List[InstrumentFailureMode] = Field(default_factory=list)
-    # time_cost_s: simulated operation time in seconds (0 = no artificial delay)
     time_cost_s:   float = 0.0
     enabled:       bool  = True
     is_default:    bool  = False
@@ -64,6 +47,7 @@ class VirtualInstrument(BaseModel):
     metadata:      Dict[str, Any] = Field(default_factory=dict)
 
 
+# Alias for backward compatibility
 VirtualTool = VirtualInstrument
 
 
@@ -119,24 +103,14 @@ class InstrumentRegistry:
         return self._instruments[tool_id]
 
     def all_controllable_parameters(self) -> List[str]:
-        params: set = set()
-        for t in self.list_all():
-            for p in t.parameters:
-                params.add(p.name)
-        return sorted(params)
+        return sorted({p.name for t in self.list_all() for p in t.parameters})
 
     def all_measurable_outputs(self) -> List[str]:
-        outputs: set = set()
-        for t in self.list_all():
-            for o in t.outputs:
-                outputs.add(o.name)
-        return sorted(outputs)
+        return sorted({o.name for t in self.list_all() for o in t.outputs})
 
     def get_time_cost(self, instrument_name: str, default: float = 0.0) -> float:
         inst = self.get_by_name(instrument_name)
-        if inst and inst.time_cost_s > 0:
-            return inst.time_cost_s
-        return default
+        return inst.time_cost_s if inst and inst.time_cost_s > 0 else default
 
     def check_feasibility(
         self,
@@ -159,29 +133,24 @@ class InstrumentRegistry:
         instruments = self.list_all()
         if not instruments:
             return "No instruments registered."
-        lines = ["Registered lab instruments:\n"]
+        lines = []
         for t in instruments:
-            lines.append(f"### {t.name} ({t.category} / {t.sub_category or t.kind})")
+            lines.append(f"### {t.name} ({t.category}/{t.sub_category or t.kind})")
             lines.append(f"  {t.description}")
             if t.parameters:
-                lines.append("  Controllable parameters:")
-                for p in t.parameters:
-                    rng = f" [{p.min}–{p.max} {p.unit}]" if p.min is not None else ""
-                    lines.append(f"    - {p.name}{rng}: {p.description}")
+                params_str = "; ".join(
+                    f"{p.name}[{p.min}–{p.max}{p.unit}]" for p in t.parameters
+                )
+                lines.append(f"  Params: {params_str}")
             if t.outputs:
-                lines.append("  Measurable outputs:")
-                for o in t.outputs:
-                    lines.append(f"    - {o.name} ({o.unit}): {o.description}")
+                outputs_str = "; ".join(f"{o.name}({o.unit})" for o in t.outputs)
+                lines.append(f"  Outputs: {outputs_str}")
             if t.failure_modes:
-                lines.append("  Failure modes:")
-                for fm in t.failure_modes:
-                    if fm.probability > 0:
-                        lines.append(
-                            f"    - {fm.name} (p≈{fm.probability:.0%}): {fm.description}"
-                        )
+                fm = t.failure_modes[0]
+                if fm.probability > 0:
+                    lines.append(f"  Failure: {fm.name} p≈{fm.probability:.0%}")
             if t.time_cost_s > 0:
-                lines.append(f"  Simulated time cost: {t.time_cost_s}s per call")
-            lines.append("")
+                lines.append(f"  Time: {t.time_cost_s}s")
         return "\n".join(lines)
 
     def to_dict_list(self) -> List[dict]:
@@ -206,7 +175,6 @@ class InstrumentRegistry:
             for (defn,) in rows:
                 try:
                     data = json.loads(defn)
-                    # Migrate legacy time_cost_min → time_cost_s
                     if "time_cost_min" in data and "time_cost_s" not in data:
                         data["time_cost_s"] = data.pop("time_cost_min")
                     inst = VirtualInstrument(**data)
@@ -252,7 +220,7 @@ class InstrumentRegistry:
             print(f"[WARN] Could not delete instrument {tool_id}: {e}")
 
 
-INSTRUMENT_REGISTRY = InstrumentRegistry()
+# Single registry instance used throughout the application
 TOOL_REGISTRY = InstrumentRegistry()
 
 
@@ -264,8 +232,7 @@ def register_default_instruments() -> None:
         return
 
     import os
-    demo_mode = os.getenv("MAESTRO_DEMO_MODE", "true").lower() != "false"
-    if not demo_mode:
+    if os.getenv("MAESTRO_DEMO_MODE", "true").lower() == "false":
         print("[INFO] No instruments found. Add instruments via Lab Setup.")
         return
 
@@ -278,8 +245,7 @@ def register_default_instruments() -> None:
         sub_category="synthesis",
         description=(
             "Prepares battery electrode samples by controlling active material "
-            "composition and electrode porosity. Simulates slurry coating and "
-            "calendering. Backed by a simulation adapter."
+            "composition and electrode porosity. Simulates slurry coating and calendering."
         ),
         parameters=[
             InstrumentParameter(
@@ -297,10 +263,7 @@ def register_default_instruments() -> None:
         failure_modes=[
             InstrumentFailureMode(
                 name="electrode_defect",
-                description=(
-                    "Sample preparation fails. Probability increases at high "
-                    "active_material and low porosity."
-                ),
+                description="Sample preparation fails at high active_material and low porosity.",
                 probability=0.06,
             ),
         ],
@@ -315,9 +278,9 @@ def register_default_instruments() -> None:
         category="physical",
         sub_category="characterisation",
         description=(
-            "Electrochemical discharge tester. Measures specific energy of a "
-            "prepared electrode sample under a specified constant power discharge. "
-            "Backed by a validated surrogate model with Gaussian noise (σ=0.5 Wh/kg)."
+            "Electrochemical discharge tester. Measures specific energy of a prepared "
+            "electrode sample under constant power discharge. "
+            "Uses a validated surrogate model with Gaussian noise (σ=0.5 Wh/kg)."
         ),
         parameters=[
             InstrumentParameter(
@@ -352,7 +315,7 @@ def register_default_instruments() -> None:
         sub_category="data",
         description=(
             "Persistent SQLite store for all experimental results. "
-            "Supports read-only SQL SELECT queries for analysis and reporting."
+            "Supports read-only SQL SELECT queries."
         ),
         parameters=[],
         outputs=[
