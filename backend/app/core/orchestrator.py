@@ -1,12 +1,3 @@
-"""
-Session management and workflow execution for MAESTRO.
-
-Tool message chain integrity:
-  - session.agent_state.messages is the persistent history.
-  - Tool responses are appended here only when they correspond to a real tool call.
-  - _ensure_tool_calls_answered in llm.py handles the call-time copy for API validity.
-  - This file never calls _repair_tool_call_chain or _inject_missing_tool_responses.
-"""
 from __future__ import annotations
 
 import json
@@ -37,6 +28,7 @@ SESSIONS:      Dict[str, SessionModel]   = {}
 SESSION_LOCKS: Dict[str, threading.Lock] = {}
 
 _INSTRUMENT_STEP_KINDS = {"synthesise", "characterise", "optimise_condition", "extract_feasibility"}
+_NON_INSTRUMENT_STEP_KINDS = {"list_samples", "generate_plot", "analyse_data", "query_database"}
 
 
 def _lock_for(session_id: str) -> threading.Lock:
@@ -93,11 +85,6 @@ def _plan_requires_approval(plan: list) -> bool:
 
 
 def _append_tool_response(session: SessionModel, tool_call_id: str, name: str, content: str) -> None:
-    """
-    Append a tool response to the persistent message history.
-    Only appends if there is a preceding assistant message with a matching tool_call_id.
-    Prevents orphaned tool messages that cause API errors.
-    """
     messages = session.agent_state.messages
     for msg in reversed(messages):
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
@@ -110,10 +97,8 @@ def _append_tool_response(session: SessionModel, tool_call_id: str, name: str, c
                     "content":      content,
                 })
                 return
-        # Don't search past a tool message block
         if msg.get("role") == "user":
             break
-    # If no matching tool_call found, log and skip — do not append
     print(f"[WARN] Skipping orphaned tool response for tool_call_id={tool_call_id}, name={name}")
 
 
@@ -122,7 +107,6 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
     lock    = _lock_for(session_id)
 
     with lock:
-        # Clear any stale pending state from a previous turn
         if session.pending_plan is not None:
             session.pending_plan = None
             session.agent_state.awaiting_confirmation = False
@@ -167,10 +151,6 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
 
 
 def _check_plan_feasibility(session: SessionModel, steps: list) -> str | None:
-    """
-    Check whether proposed workflow steps are feasible given registered instruments.
-    Returns a warning string if infeasible, None if feasible or no instrument steps.
-    """
     from app.core.tool_registry import TOOL_REGISTRY
 
     instrument_steps = [
@@ -291,7 +271,6 @@ def _handle_plan_requiring_approval(session, lock, plan, pending_calls, pending_
                     )
             return
 
-        # Capability check on all proposed workflows
         feasibility_warning = _check_plan_feasibility(
             session, [s.model_dump() for s in all_steps]
         )
@@ -339,24 +318,22 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
     dag_context  = {}
     tool_results = []
 
-    _executable_kinds = {"list_samples", "generate_plot", "analyse_data", "query_database"}
-
     for step in plan:
-        if step.get("kind") not in _executable_kinds:
+        kind = step.get("kind", "")
+        if kind not in _NON_INSTRUMENT_STEP_KINDS:
             continue
         try:
             result = execute_plan_step(session, step, query_database, dag_context)
         except Exception as e:
             result = {"status": "error", "message": str(e)}
-        tool_results.append((step.get("kind"), result))
+        tool_results.append((kind, result))
 
-        if step.get("kind") == "generate_plot" and result.get("status") == "ok":
+        if kind == "generate_plot" and result.get("status") == "ok":
             session.agent_state.messages.append({
                 "role":    "assistant",
                 "content": f"Here is the summary figure:\n\n![Summary](/api/plot/{session.session_id})",
             })
 
-    # Append tool responses for every pending call so the message chain stays valid
     summary_result = json.dumps(
         {"status": "ok", "results": [r for _, r in tool_results]}, default=str
     )
@@ -383,6 +360,7 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
             followup_plan  = build_execution_plan_from_tool_calls(session, followup_calls)
             if not _plan_requires_approval(followup_plan):
                 _execute_non_instrument_actions(session, lock, followup_plan, followup_calls)
+
 
 def _sync_condition_key(session: SessionModel) -> None:
     if session.extracted_campaign:
@@ -466,7 +444,6 @@ def _safe_parse_args(tc: dict) -> dict:
 
 
 def _normalise_step(s: dict, session: SessionModel) -> dict:
-    """Apply defensive defaults to a raw step dict from the LLM."""
     kind = s.get("kind", "step")
 
     if not s.get("label"):
@@ -624,31 +601,25 @@ def _consume_one_live_event(session: SessionModel) -> None:
 
 
 def _run_background_job(session_id: str) -> None:
-    session          = get_session(session_id)
-    lock             = _lock_for(session_id)
-    dag_context:     dict = {}
-    instrument_locks: dict[str, threading.Lock] = {}
-
-    def get_instrument_lock(instrument_id: str) -> threading.Lock:
-        if instrument_id not in instrument_locks:
-            instrument_locks[instrument_id] = threading.Lock()
-        return instrument_locks[instrument_id]
-
-    def set_step_status(step_id: str, status: str) -> None:
-        with lock:
-            session.step_statuses[step_id] = status
-
-    def get_step_status(step_id: str) -> str:
-        with lock:
-            return session.step_statuses.get(step_id, "pending")
-
-    def all_dependencies_complete(step: dict) -> bool:
-        return all(get_step_status(d) == "completed" for d in step.get("dependencies", []))
+    session      = get_session(session_id)
+    lock         = _lock_for(session_id)
+    dag_context: dict = {}
 
     with lock:
         for step in session.background_job_plan:
             if sid := step.get("step_id"):
                 session.step_statuses[sid] = "pending"
+
+    def set_step_status(step_id: str, status: str) -> None:
+        with lock:
+            session.step_statuses[step_id] = status
+
+    def drain_events() -> None:
+        while session.live_event_queue:
+            with lock:
+                if session.live_event_queue:
+                    _consume_one_live_event(session)
+            time.sleep(0.05)
 
     def mark_done(success: bool, error_msg: str = "") -> None:
         with lock:
@@ -658,6 +629,7 @@ def _run_background_job(session_id: str) -> None:
             session.current_activity       = None
             session.equipment_status       = EquipmentStatusModel()
             session.pending_plan           = None
+            session.projected_schedule     = [] 
 
             if not success:
                 session.background_job_error = error_msg
@@ -715,75 +687,38 @@ def _run_background_job(session_id: str) -> None:
                 },
             ))
 
-    def execute_step_thread(step: dict) -> None:
-        step_id       = step.get("step_id", "")
-        instrument_id = step.get("instrument_id", "unknown")
-        inst_lock     = get_instrument_lock(instrument_id)
+    try:
+        # Execute steps sequentially — preserves implicit ordering (synthesise before characterise)
+        for step in session.background_job_plan:
+            step_id = step.get("step_id", "")
 
-        while not all_dependencies_complete(step):
-            if any(get_step_status(d) == "failed" for d in step.get("dependencies", [])):
-                set_step_status(step_id, "skipped")
-                return
-            time.sleep(0.1)
-
-        with inst_lock:
-            set_step_status(step_id, "running")
             with lock:
                 session.background_job_label = step.get("label") or step.get("kind", "running")
+
+            set_step_status(step_id, "running")
+            drain_events()
+
             try:
                 result = execute_plan_step(session, step, query_database, dag_context)
                 with lock:
                     session.agent_state.last_tool_result = result
-                set_step_status(step_id, "failed" if result.get("status") == "error" else "completed")
+                status = "failed" if result.get("status") == "error" else "completed"
+                set_step_status(step_id, status)
             except Exception as step_err:
                 with lock:
                     session.activity_log.append(f"[WARNING] Step '{step.get('kind')}' error: {step_err}")
                     session.activity_log = session.activity_log[-50:]
                 set_step_status(step_id, "failed")
 
-        with lock:
-            session.background_job_index = sum(
-                1 for s in session.background_job_plan
-                if session.step_statuses.get(s.get("step_id", "")) == "completed"
-            )
-
-    try:
-        stop_drain = threading.Event()
-
-        def drain_events() -> None:
-            while not stop_drain.is_set():
-                with lock:
-                    if session.live_event_queue:
-                        _consume_one_live_event(session)
-                time.sleep(0.08)
-
-        event_thread = threading.Thread(
-            target=drain_events, daemon=True,
-            name=f"maestro-events-{session_id[:8]}",
-        )
-        event_thread.start()
-
-        step_threads = [
-            threading.Thread(
-                target=execute_step_thread, args=(step,), daemon=True,
-                name=f"maestro-step-{step.get('step_id', 'x')[:6]}",
-            )
-            for step in session.background_job_plan
-        ]
-        for t in step_threads:
-            t.start()
-        for t in step_threads:
-            t.join()
-
-        stop_drain.set()
-        event_thread.join(timeout=1.0)
-
-        time.sleep(0.3)
-        while session.live_event_queue:
             with lock:
-                _consume_one_live_event(session)
-            time.sleep(0.05)
+                session.background_job_index = sum(
+                    1 for s in session.background_job_plan
+                    if session.step_statuses.get(s.get("step_id", "")) == "completed"
+                )
 
+            drain_events()
+
+        drain_events()
         mark_done(success=True)
 
     except Exception as fatal:

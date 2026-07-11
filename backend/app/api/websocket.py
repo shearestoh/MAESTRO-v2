@@ -1,7 +1,3 @@
-"""
-WebSocket endpoint — streams live agent events to the browser.
-Drains all queued events per tick and sends a state_update after each.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +6,8 @@ import json
 from fastapi import WebSocket, WebSocketDisconnect
 
 from app.core.orchestrator import get_session
+
+_PING_INTERVAL = 15  # seconds between pings to keep proxy connections alive
 
 
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
@@ -21,11 +19,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         await websocket.close(code=4004, reason="Unknown session")
         return
 
-    last_job_status = None
+    last_job_status  = None
+    last_ping        = asyncio.get_event_loop().time()
 
     try:
         while True:
-            events_sent = 0
+            now          = asyncio.get_event_loop().time()
+            events_sent  = 0
+
             while session.live_event_queue:
                 event = session.live_event_queue[0]
                 try:
@@ -96,6 +97,20 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         },
                     }))
                     last_job_status = current_status
+                except Exception:
+                    break
+
+            # Send a ping periodically to keep proxy connections alive
+            if now - last_ping >= _PING_INTERVAL:
+                try:
+                    await websocket.send_text(json.dumps({
+                        "event_type": "ping",
+                        "message":    "",
+                        "equipment":  None,
+                        "category":   "system",
+                        "payload":    {},
+                    }))
+                    last_ping = now
                 except Exception:
                     break
 

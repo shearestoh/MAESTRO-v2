@@ -62,6 +62,16 @@ OPTIMISE_CONDITION — ALL FIELDS REQUIRED:
   optimiser_name: "gp_bo" | "random" | "optuna" | "honegumi" | "deap",
   n_calls, n_initial_points
 
+  CRITICAL DISTINCTION:
+  - condition_label / condition_value: the FIXED external variable held constant during this BO run.
+    Example: if optimising at 90W discharge power → condition_label="power_W", condition_value=90, condition_unit="W"
+  - free_params: the variables the optimiser SEARCHES OVER (the search space).
+    Example: active_material [88–98 wt%], porosity [20–60 %]
+  - The condition is NOT one of the free_params. They are separate concepts.
+  - If the user says "optimise X and Y to maximise Z under fixed W=v", then:
+      condition_label = "W", condition_value = v
+      free_params = [{name: "X", ...}, {name: "Y", ...}]
+
 SYNTHESISE: label, instrument, params {dict}
 CHARACTERISE: label, sample_ref, conditions {dict}, measures
 

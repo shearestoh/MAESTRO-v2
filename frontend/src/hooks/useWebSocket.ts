@@ -47,9 +47,11 @@ export function useWebSocket() {
       try {
         const event = JSON.parse(ev.data as string) as WsEvent;
 
+        // Silently ignore ping keepalives
+        if (event.event_type === "ping") return;
+
         if (event.event_type === "state_update") {
           const payload = event.payload as Record<string, unknown>;
-          // Refresh on job completion events
           if (payload.job_complete === true) {
             refreshState();
             setTimeout(() => refreshState(), 400);
@@ -62,10 +64,8 @@ export function useWebSocket() {
           return;
         }
 
-        // Push displayable events to the log
         pushWsEvent(event);
 
-        // Refresh state only on meaningful completion events, not every event
         if (REFRESH_EVENT_TYPES.has(event.event_type)) {
           refreshState();
         }

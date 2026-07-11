@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, memo } from "react";
+import { useRef, useEffect, memo, useState } from "react";
 import { useMaestroStore } from "@/store/maestroStore";
 import { cn } from "@/lib/utils";
 import {
@@ -10,31 +10,21 @@ import ReactMarkdown from "react-markdown";
 import type { Message, ToolCall, WorkflowPlan, WorkflowStep } from "@/types";
 
 export function AgentChat() {
-  const sessionId   = useMaestroStore((s) => s.sessionId);
-  const state       = useMaestroStore((s) => s.state);
-  const isLoading   = useMaestroStore((s) => s.isLoading);
-  const sendMessage = useMaestroStore((s) => s.sendMessage);
-  const confirm     = useMaestroStore((s) => s.confirm);
-  const executePlan = useMaestroStore((s) => s.executePlan);
+  const state            = useMaestroStore((s) => s.state);
+  const isLoading        = useMaestroStore((s) => s.isLoading);
+  const optimisticMessage= useMaestroStore((s) => s.optimisticMessage);
+  const sendMessage      = useMaestroStore((s) => s.sendMessage);
+  const confirm          = useMaestroStore((s) => s.confirm);
+  const executePlan      = useMaestroStore((s) => s.executePlan);
 
-  const [input,             setInput]             = useState("");
-  const [optimisticMessage, setOptimisticMessage] = useState<string | null>(null);
+  const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const canonicalMessages: Message[] = (state?.messages ?? []).filter(
     (m) => m.role !== "system" && m.role !== "tool"
   );
 
-  // Once the backend echoes the message back, clear the optimistic copy
-  useEffect(() => {
-    if (optimisticMessage && canonicalMessages.some(
-      (m) => m.role === "user" && m.content === optimisticMessage
-    )) {
-      setOptimisticMessage(null);
-    }
-  }, [canonicalMessages, optimisticMessage]);
-
-  // Combine: canonical messages + optimistic tail (if not yet echoed)
+  // Combine canonical messages with the optimistic tail if not yet echoed
   const messages: Message[] = optimisticMessage
     ? [...canonicalMessages, { role: "user" as const, content: optimisticMessage }]
     : canonicalMessages;
@@ -50,7 +40,6 @@ export function AgentChat() {
     const text = input.trim();
     if (!text || isLoading || bgActive) return;
     setInput("");
-    setOptimisticMessage(text);
     await sendMessage(text);
   };
 
@@ -308,13 +297,13 @@ function WorkflowPlanEditor({
       return "📈";
     }
     const icons: Record<string, string> = {
-      synthesise:    "🧪",
-      characterise:  "⚡",
-      list_samples:  "📋",
-      query_database:"💾",
-      generate_plot: "📊",
-      analyse_data:  "📉",
-      narration:     "💬",
+      synthesise:     "🧪",
+      characterise:   "⚡",
+      list_samples:   "📋",
+      query_database: "💾",
+      generate_plot:  "📊",
+      analyse_data:   "📉",
+      narration:      "💬",
     };
     return icons[step.kind] ?? "⚙️";
   }

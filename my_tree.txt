@@ -1239,8 +1239,7 @@
 │   ├── tsconfig.json
 │   ├── tsconfig.node.json
 │   └── vite.config.ts
-├── lab_config.json
 ├── maestro.db
 └── my_tree.txt
 
-396 directories, 848 files
+396 directories, 847 files

@@ -10,7 +10,6 @@ const navItems = [
   { to: "/",         icon: LayoutDashboard, label: "Dashboard"    },
   { to: "/lab",      icon: Settings,        label: "Lab Setup"    },
   { to: "/notebook", icon: BookOpen,        label: "Lab Notebook" },
-  { to: "/campaign", icon: FlaskConical,    label: "Campaign"     },
 ];
 
 function MaestroLogo({ size = 32 }: { size?: number }) {

@@ -1008,12 +1008,19 @@ def execute_plan_step(
             category="reporting",
             payload={},
         ))
-        plot_code = step.get("plot_code", "")
-        if not plot_code:
-            plot_code = _default_summary_plot_code()
+        plot_code = step.get("plot_code", "") or _default_summary_plot_code()
 
-        try:
-            fig_path = generate_plot(session, plot_code)
+        def _try_plot(code: str) -> str | None:
+            try:
+                return generate_plot(session, code)
+            except Exception:
+                return None
+
+        fig_path = _try_plot(plot_code)
+        if fig_path is None and plot_code != _default_summary_plot_code():
+            fig_path = _try_plot(_default_summary_plot_code())
+
+        if fig_path:
             session.show_plotter_image = fig_path
             session.live_event_queue.append(ExecutionEvent(
                 event_type="plotter_done",
@@ -1023,53 +1030,19 @@ def execute_plan_step(
                 payload={},
             ))
             return {"status": "ok", "figure_path": fig_path}
-        except RuntimeError as first_err:
-            # Custom plot code failed — fall back to the default summary plot
-            if plot_code != _default_summary_plot_code():
-                session.live_event_queue.append(ExecutionEvent(
-                    event_type="plotter_warn",
-                    message="Custom plot failed — generating default summary figure.",
-                    equipment="reporting",
-                    category="reporting",
-                    payload={},
-                ))
-                try:
-                    fig_path = generate_plot(session, _default_summary_plot_code())
-                    session.show_plotter_image = fig_path
-                    session.agent_state.messages.append({
-                        "role":    "assistant",
-                        "content": (
-                            "⚠️ The custom plot code encountered an error. "
-                            "Here is the default summary figure instead:\n\n"
-                            f"![Summary](/api/plot/{session.session_id})"
-                        ),
-                    })
-                    session.live_event_queue.append(ExecutionEvent(
-                        event_type="plotter_done",
-                        message="Default figure ready.",
-                        equipment="reporting",
-                        category="reporting",
-                        payload={},
-                    ))
-                    return {"status": "ok", "figure_path": fig_path, "fallback": True}
-                except RuntimeError as fallback_err:
-                    session.live_event_queue.append(ExecutionEvent(
-                        event_type="plotter_fail",
-                        message=f"Figure generation failed: {fallback_err}",
-                        equipment="reporting",
-                        category="reporting",
-                        payload={},
-                    ))
-                    return {"status": "error", "message": str(fallback_err)}
-            else:
-                session.live_event_queue.append(ExecutionEvent(
-                    event_type="plotter_fail",
-                    message=f"Figure generation failed: {first_err}",
-                    equipment="reporting",
-                    category="reporting",
-                    payload={},
-                ))
-                return {"status": "error", "message": str(first_err)}
+        else:
+            session.agent_state.messages.append({
+                "role":    "assistant",
+                "content": "⚠️ Figure generation failed. Try asking for a simpler plot or check that there are results to display.",
+            })
+            session.live_event_queue.append(ExecutionEvent(
+                event_type="plotter_fail",
+                message="Figure generation failed.",
+                equipment="reporting",
+                category="reporting",
+                payload={},
+            ))
+            return {"status": "error", "message": "Figure generation failed"}
 
     if kind == "analyse_data":
         session.live_event_queue.append(ExecutionEvent(

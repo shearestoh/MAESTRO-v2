@@ -6,17 +6,18 @@ import type {
 import { api } from "@/lib/api";
 
 interface MaestroStore {
-  sessionId:           string | null;
-  state:               SessionState | null;
-  isLoading:           boolean;
-  error:               string | null;
-  wsConnected:         boolean;
-  liveEvents:          WsEvent[];
-  lastEvent:           WsEvent | null;
-  sidebarOpen:         boolean;
-  labSettings:         LabSettings | null;
-  optimisationLibrary: OptimisationLibraryEntry[];
-  instruments:         VirtualInstrument[];
+  sessionId:            string | null;
+  state:                SessionState | null;
+  isLoading:            boolean;
+  error:                string | null;
+  wsConnected:          boolean;
+  liveEvents:           WsEvent[];
+  lastEvent:            WsEvent | null;
+  sidebarOpen:          boolean;
+  labSettings:          LabSettings | null;
+  optimisationLibrary:  OptimisationLibraryEntry[];
+  instruments:          VirtualInstrument[];
+  optimisticMessage:    string | null;
 
   initSession:             () => Promise<void>;
   refreshState:            () => Promise<void>;
@@ -47,6 +48,7 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
   labSettings:         null,
   optimisationLibrary: [],
   instruments:         [],
+  optimisticMessage:   null,
 
   initSession: async () => {
     set({ isLoading: true, error: null });
@@ -76,16 +78,23 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
   },
 
   refreshState: async () => {
-    const { sessionId } = get();
+    const { sessionId, optimisticMessage } = get();
     if (!sessionId) return;
     try {
       const res    = await api.getState(sessionId);
       const isDone = !res.state.background_job_active ||
         res.state.background_job_status === "completed" ||
         res.state.background_job_status === "failed";
+
+      // Clear optimistic message once the backend has echoed it back
+      const echoed = optimisticMessage && res.state.messages.some(
+        (m) => m.role === "user" && m.content === optimisticMessage
+      );
+
       set((s) => ({
-        state:     res.state,
-        isLoading: isDone ? false : s.isLoading,
+        state:             res.state,
+        isLoading:         isDone ? false : s.isLoading,
+        optimisticMessage: echoed ? null : s.optimisticMessage,
       }));
     } catch (e) {
       set({ error: String(e), isLoading: false });
@@ -95,12 +104,12 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
   sendMessage: async (text) => {
     const { sessionId } = get();
     if (!sessionId) return;
-    set({ isLoading: true });
+    set({ isLoading: true, optimisticMessage: text });
     try {
       const res = await api.sendMessage(sessionId, text);
-      set({ state: res.state, isLoading: false });
+      set({ state: res.state, isLoading: false, optimisticMessage: null });
     } catch (e) {
-      set({ error: String(e), isLoading: false });
+      set({ error: String(e), isLoading: false, optimisticMessage: null });
     }
   },
 
@@ -142,12 +151,13 @@ export const useMaestroStore = create<MaestroStore>((set, get) => ({
     localStorage.setItem("maestro_session_id", created.session_id);
     const stateRes = await api.getState(created.session_id);
     set({
-      sessionId:  created.session_id,
-      state:      stateRes.state,
-      liveEvents: [],
-      lastEvent:  null,
-      isLoading:  false,
-      error:      null,
+      sessionId:         created.session_id,
+      state:             stateRes.state,
+      liveEvents:        [],
+      lastEvent:         null,
+      isLoading:         false,
+      error:             null,
+      optimisticMessage: null,
     });
   },
 

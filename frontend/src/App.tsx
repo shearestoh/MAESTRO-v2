@@ -4,7 +4,6 @@ import { Sidebar }         from "@/components/layout/Sidebar";
 import { Dashboard }       from "@/pages/Dashboard";
 import { LabSetup }        from "@/pages/LabSetup";
 import { LabNotebook }     from "@/pages/LabNotebook";
-import { Campaign }        from "@/pages/Campaign";
 import { useMaestroStore } from "@/store/maestroStore";
 import { useWebSocket }    from "@/hooks/useWebSocket";
 import { usePolling }      from "@/hooks/usePolling";
@@ -47,7 +46,6 @@ function AppShell() {
             <Route path="/"         index element={<Dashboard />} />
             <Route path="/lab"      element={<LabSetup />} />
             <Route path="/notebook" element={<LabNotebook />} />
-            <Route path="/campaign" element={<Campaign />} />
           </Routes>
         </main>
       </div>
