@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from typing import Dict
+import re
 
 from app.core.database import ensure_db, query_database, reset_evaluations
 from app.core.llm import llm_plan, _NON_INSTRUMENT_ACTIONS
@@ -84,20 +85,73 @@ def _plan_requires_approval(plan: list) -> bool:
 
 
 def _append_tool_response(session: SessionModel, tool_call_id: str, name: str, content: str) -> None:
-    for msg in reversed(session.agent_state.messages):
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            if tool_call_id in {tc.get("id") for tc in msg["tool_calls"]}:
-                session.agent_state.messages.append({
-                    "role":         "tool",
-                    "tool_call_id": tool_call_id,
-                    "name":         name,
-                    "content":      content,
-                })
-                return
-        if msg.get("role") == "user":
-            break
-    print(f"[WARN] Orphaned tool response: tool_call_id={tool_call_id}, name={name}")
+    """
+    Insert a tool response message immediately after the assistant message
+    that contains the matching tool_call_id.
+    Searches the full message history — does not stop at user messages.
+    """
+    messages = session.agent_state.messages
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "assistant":
+            continue
+        if not msg.get("tool_calls"):
+            continue
+        ids = {tc.get("id") for tc in msg["tool_calls"]}
+        if tool_call_id not in ids:
+            continue
+        # Check if a response already exists for this tool_call_id
+        already_responded = any(
+            m.get("role") == "tool" and m.get("tool_call_id") == tool_call_id
+            for m in messages[i+1:]
+        )
+        if already_responded:
+            return
+        # Find the right insertion point: after the assistant message and
+        # any existing tool responses that belong to the same assistant message
+        insert_at = i + 1
+        while insert_at < len(messages) and messages[insert_at].get("role") == "tool":
+            insert_at += 1
+        messages.insert(insert_at, {
+            "role":         "tool",
+            "tool_call_id": tool_call_id,
+            "name":         name,
+            "content":      content,
+        })
+        return
+    print(f"[WARN] Could not find assistant message for tool_call_id={tool_call_id}, name={name}")
 
+
+def _sweep_unanswered_tool_calls(messages: list) -> None:
+    """
+    Inject synthetic tool responses for any tool_call_id that was never answered.
+    Accepts the messages list directly. Mutates in place.
+    Prevents HTTP 400 from the OpenAI API on subsequent turns.
+    """
+    responded = {
+        m["tool_call_id"]
+        for m in messages
+        if m.get("role") == "tool" and m.get("tool_call_id")
+    }
+    injections = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls", []):
+            tc_id   = tc.get("id")
+            tc_name = tc.get("function", {}).get("name", "unknown")
+            if tc_id and tc_id not in responded:
+                injections.append((i + 1, {
+                    "role":         "tool",
+                    "tool_call_id": tc_id,
+                    "name":         tc_name,
+                    "content":      json.dumps({
+                        "status":  "completed",
+                        "message": f"Tool '{tc_name}' executed.",
+                    }),
+                }))
+                responded.add(tc_id)
+    for insert_idx, tool_msg in reversed(injections):
+        messages.insert(insert_idx, tool_msg)
 
 def post_user_message(session_id: str, text: str) -> SessionModel:
     session = get_session(session_id)
@@ -121,7 +175,7 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
             payload={},
         ))
 
-    llm_plan(session)
+    llm_plan(session)  # _sweep_unanswered_tool_calls now called inside llm_plan
 
     if session.agent_state.awaiting_confirmation:
         pending_calls = list(session.agent_state.pending_tool_calls)
@@ -144,7 +198,24 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
             payload={},
         ))
 
+    # Final sweep: ensure no unanswered tool calls remain before next user turn
+    _sweep_unanswered_tool_calls(session.agent_state.messages)
+
     return session
+
+def _normalise_metric_name(name: str) -> str:
+    """
+    Strip units, parentheses, and whitespace from a metric name for comparison.
+    e.g. "specific_energy(Wh/kg)" -> "specific_energy"
+         "Specific Energy [Wh/kg]" -> "specific_energy"
+    """
+    # Remove anything in parentheses or brackets (units)
+    cleaned = re.sub(r'[\(\[\{][^\)\]\}]*[\)\]\}]', '', name)
+    # Lowercase and replace spaces/hyphens with underscores
+    cleaned = re.sub(r'[\s\-]+', '_', cleaned.strip().lower())
+    # Remove trailing underscores
+    cleaned = cleaned.strip('_')
+    return cleaned
 
 
 def _check_plan_feasibility(session: SessionModel, steps: list) -> str | None:
@@ -178,22 +249,25 @@ def _check_plan_feasibility(session: SessionModel, steps: list) -> str | None:
     if not required_params and not required_outputs:
         return None
 
-    feasibility = TOOL_REGISTRY.check_feasibility(list(required_params), list(required_outputs))
-    if feasibility["feasible"]:
+    # Normalise names before feasibility check to handle units in parentheses
+    controllable    = {_normalise_metric_name(p) for p in TOOL_REGISTRY.all_controllable_parameters()}
+    measurable      = {_normalise_metric_name(o) for o in TOOL_REGISTRY.all_measurable_outputs()}
+    missing_params  = [p for p in required_params  if _normalise_metric_name(p) not in controllable]
+    missing_outputs = [o for o in required_outputs if _normalise_metric_name(o) not in measurable]
+
+    if not missing_params and not missing_outputs:
         return None
 
-    missing_p = feasibility.get("missing_params", [])
-    missing_o = feasibility.get("missing_outputs", [])
-    parts     = []
-    if missing_p:
-        parts.append(f"parameters not controllable: **{', '.join(missing_p)}**")
-    if missing_o:
-        parts.append(f"objectives not measurable: **{', '.join(missing_o)}**")
+    parts = []
+    if missing_params:
+        parts.append(f"parameters not controllable: **{', '.join(missing_params)}**")
+    if missing_outputs:
+        parts.append(f"objectives not measurable: **{', '.join(missing_outputs)}**")
 
     return (
         f"⚠️ **Capability check failed.** This workflow requires {' and '.join(parts)}.\n\n"
-        f"Available parameters: {feasibility.get('available_params') or 'none'}\n"
-        f"Available outputs: {feasibility.get('available_outputs') or 'none'}\n\n"
+        f"Available parameters: {sorted(TOOL_REGISTRY.all_controllable_parameters())}\n"
+        f"Available outputs: {sorted(TOOL_REGISTRY.all_measurable_outputs())}\n\n"
         f"Please register the appropriate instruments in Lab Setup, or adjust the workflow."
     )
 
@@ -326,13 +400,21 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
                 "content": f"Here is the summary figure:\n\n![Summary](/api/plot/{session.session_id})",
             })
 
+    # Append tool responses immediately — before any follow-up LLM call.
+    # Use a single combined result so each pending call gets answered.
     summary_result = json.dumps(
         {"status": "ok", "results": [r for _, r in tool_results]}, default=str
     )
     for tc in pending_calls:
-        _append_tool_response(session, tc["id"], tc["function"]["name"], summary_result)
+        _append_tool_response(
+            session, tc["id"], tc["function"]["name"], summary_result
+        )
 
-    needs_followup = any(kind in ("query_database", "list_samples") for kind, _ in tool_results)
+    # Only do a follow-up LLM call for database/sample queries that need interpretation.
+    needs_followup = any(
+        kind in ("query_database", "list_samples")
+        for kind, _ in tool_results
+    )
     if needs_followup:
         with lock:
             session.equipment_status.llm = True

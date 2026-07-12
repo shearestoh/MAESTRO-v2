@@ -70,16 +70,20 @@ router = APIRouter(prefix="/api")
 
 def _summarise_document(doc) -> str:
     from app.core.documents import get_document_summary_chunk
-    chunk = get_document_summary_chunk(doc.document_id, max_chars=2000)
+    chunk = get_document_summary_chunk(doc.document_id, max_chars=1500)
     msg   = call_llm(
         messages=[
-            {"role": "system", "content": "Summarise scientific papers clearly and concisely."},
+            {
+                "role": "system",
+                "content": "Summarise scientific papers concisely in 2-3 sentences.",
+            },
             {
                 "role": "user",
                 "content": (
-                    f"Summarise this paper in 2-4 sentences. "
-                    f"Note if it contains optimisation case studies that could be reproduced.\n\n"
-                    f"Filename: {doc.filename}\n\nContent:\n{chunk}"
+                    f"Summarise this paper in 2-3 sentences. "
+                    f"Note if it contains reproducible optimisation case studies.\n\n"
+                    f"Title: {doc.title or doc.filename}\n\n"
+                    f"{chunk}"
                 ),
             },
         ],

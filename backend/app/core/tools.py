@@ -198,8 +198,7 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
     def to_iso(d: dt) -> str:
         return d.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
-    def get_duration_seconds(step: dict, resolved_instrument: str = "") -> float:
-        """Get time cost for a step, using registry lookup for synthesise/characterise."""
+    def get_duration(step: dict, resolved_instrument: str = "") -> float:
         instrument_nm = step.get("instrument", "") or resolved_instrument
         if instrument_nm:
             cost = TOOL_REGISTRY.get_time_cost(instrument_nm, default=-1)
@@ -208,29 +207,37 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
         kind = step.get("kind", "")
         if kind == "synthesise":
             synth_list = TOOL_REGISTRY.list_by_sub_category("synthesis")
-            if synth_list:
-                return TOOL_REGISTRY.get_time_cost(synth_list[0].name, default=5.0)
-            return 5.0
+            return TOOL_REGISTRY.get_time_cost(synth_list[0].name, default=5.0) if synth_list else 5.0
         if kind == "characterise":
             char_list = TOOL_REGISTRY.list_by_sub_category("characterisation")
-            if char_list:
-                return TOOL_REGISTRY.get_time_cost(char_list[0].name, default=8.0)
-            return 8.0
+            return TOOL_REGISTRY.get_time_cost(char_list[0].name, default=8.0) if char_list else 8.0
         return 0.0
 
+    # step_id → projected end time (for explicit dependency resolution)
     step_end:        Dict[str, dt] = {}
+    # instrument_id → next available time (for instrument contention)
     instrument_free: Dict[str, dt] = {}
-    entries:         List[ProjectedScheduleEntry] = []
+    # Global cursor: end time of the most recently scheduled step.
+    # Used as implicit predecessor when no explicit deps are declared,
+    # preserving the sequential ordering the LLM encoded in the plan.
+    global_cursor: dt = now
+
+    entries: List[ProjectedScheduleEntry] = []
+
+    skip_instrument_ids = {"optimiser", "memory", "reporting", "knowledge", "unknown", ""}
 
     for step in plan:
-        step_id      = step.get("step_id") or ""
-        kind         = step.get("kind", "")
-        dependencies = step.get("dependencies", [])
+        step_id = step.get("step_id") or ""
+        kind    = step.get("kind", "")
+        deps    = step.get("dependencies") or []
 
-        dep_end = max(
-            (step_end.get(dep_id, now) for dep_id in dependencies),
-            default=now,
-        )
+        # Resolve explicit dependency end times
+        if deps:
+            dep_end = max((step_end.get(dep_id, now) for dep_id in deps), default=now)
+        else:
+            # No explicit deps: use global cursor to preserve plan ordering.
+            # This ensures "synthesise all, then characterise all" projects correctly.
+            dep_end = global_cursor
 
         if kind == "optimise_condition":
             n_calls = int(step.get("n_calls") or 10)
@@ -243,16 +250,16 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
             char_time  = TOOL_REGISTRY.get_time_cost(char_name,  default=8.0)
 
             label_base = step.get("label", "Optimisation")
-            cursor     = max(dep_end, instrument_free.get("optimiser", now), now)
+            # BO pipeline: synthesise → characterise → synthesise → characterise ...
+            # Each iteration pipelines: char(i) and synth(i+1) can overlap.
+            cursor = max(dep_end, instrument_free.get("optimiser", now), now)
 
             for i in range(n_calls):
                 synth_start = max(cursor, instrument_free.get(synth_name, now))
                 synth_end   = synth_start + timedelta(seconds=synth_time)
                 entries.append(ProjectedScheduleEntry(
-                    instrument_id=synth_name,
-                    instrument_name=synth_name,
-                    start_time=to_iso(synth_start),
-                    end_time=to_iso(synth_end),
+                    instrument_id=synth_name, instrument_name=synth_name,
+                    start_time=to_iso(synth_start), end_time=to_iso(synth_end),
                     step_id=f"{step_id}-synth-{i}",
                     label=f"{label_base} iter {i + 1} — synthesise",
                     is_projected=True,
@@ -262,10 +269,8 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
                 char_start = max(synth_end, instrument_free.get(char_name, now))
                 char_end   = char_start + timedelta(seconds=char_time)
                 entries.append(ProjectedScheduleEntry(
-                    instrument_id=char_name,
-                    instrument_name=char_name,
-                    start_time=to_iso(char_start),
-                    end_time=to_iso(char_end),
+                    instrument_id=char_name, instrument_name=char_name,
+                    start_time=to_iso(char_start), end_time=to_iso(char_end),
                     step_id=f"{step_id}-char-{i}",
                     label=f"{label_base} iter {i + 1} — characterise",
                     is_projected=True,
@@ -275,15 +280,13 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
 
             step_end[step_id]            = cursor
             instrument_free["optimiser"] = cursor
+            global_cursor                = max(global_cursor, cursor)
             step["projected_start_time"] = to_iso(max(dep_end, now))
             step["projected_end_time"]   = to_iso(cursor)
 
         else:
-            # Resolve the physical instrument name for synthesise/characterise steps.
-            # The LLM may omit the instrument field — fall back to registry lookup
-            # so the Task Schedule always shows the correct physical instrument row.
+            # Resolve physical instrument name
             explicit_instrument = step.get("instrument", "")
-
             if not explicit_instrument:
                 if kind == "synthesise":
                     synth_list = TOOL_REGISTRY.list_by_sub_category("synthesis")
@@ -292,35 +295,28 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
                     char_list = TOOL_REGISTRY.list_by_sub_category("characterisation")
                     explicit_instrument = char_list[0].name if char_list else ""
 
-            raw_instrument_id = (
-                step.get("instrument_id")
-                or explicit_instrument
-                or kind
-                or "unknown"
-            )
-            instrument_id   = str(raw_instrument_id) if raw_instrument_id is not None else "unknown"
-            # Always use the resolved physical instrument name — never the step label
+            instrument_id   = str(step.get("instrument_id") or explicit_instrument or kind or "unknown")
             instrument_name = explicit_instrument or instrument_id
-            duration_s      = get_duration_seconds(step, resolved_instrument=instrument_name)
+            duration_s      = get_duration(step, resolved_instrument=instrument_name)
 
+            # Start = max(dep_end [or global_cursor], instrument_free, now)
             inst_free  = instrument_free.get(instrument_id, now)
             proj_start = max(dep_end, inst_free, now)
             proj_end   = proj_start + timedelta(seconds=duration_s)
 
             step_end[step_id]              = proj_end
             instrument_free[instrument_id] = proj_end
+            # Advance global cursor so the next step (if no explicit deps)
+            # starts after this one completes.
+            global_cursor = max(global_cursor, proj_end)
 
             step["projected_start_time"] = to_iso(proj_start)
             step["projected_end_time"]   = to_iso(proj_end)
 
-            if duration_s > 0 and instrument_id not in (
-                "optimiser", "memory", "reporting", "knowledge", "unknown", ""
-            ):
+            if duration_s > 0 and instrument_id not in skip_instrument_ids:
                 entries.append(ProjectedScheduleEntry(
-                    instrument_id=instrument_id,
-                    instrument_name=instrument_name,
-                    start_time=to_iso(proj_start),
-                    end_time=to_iso(proj_end),
+                    instrument_id=instrument_id, instrument_name=instrument_name,
+                    start_time=to_iso(proj_start), end_time=to_iso(proj_end),
                     step_id=step_id,
                     label=step.get("label", step.get("kind", "")),
                     is_projected=True,
@@ -374,6 +370,55 @@ def _sanitise_plot_code(code: str) -> str:
     return "\n".join(lines)
 
 
+class _NumpyEncoder(json.JSONEncoder):
+    """JSON encoder that handles numpy scalars and arrays cleanly."""
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        return super().default(obj)
+
+
+def _serialise(data) -> str:
+    """Serialise data containing possible numpy types to a JSON string."""
+    return json.dumps(data, cls=_NumpyEncoder)
+
+
+def _write_data_file(data: dict) -> str:
+    """
+    Write serialised data to a temp file and return the path.
+    Using a file avoids env-var size limits for large result sets.
+    """
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=".json", prefix="maestro_data_",
+        delete=False, mode="w", encoding="utf-8",
+    )
+    tmp.write(_serialise(data))
+    tmp.close()
+    return tmp.name
+
+
+# Updated preamble — reads from file instead of env var
+_PLOT_PREAMBLE = textwrap.dedent("""
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import json, sys, os
+
+_data_file      = os.environ.get("MAESTRO_DATA_FILE", "")
+data            = json.loads(open(_data_file).read()) if _data_file and os.path.exists(_data_file) else {}
+results_store   = data.get("results_store", [])
+sample_registry = data.get("sample_registry", [])
+out_file        = os.environ.get("MAESTRO_OUT_FILE", "/tmp/maestro_plot.png")
+""").strip()
+
+
 def generate_plot(session, plot_code: str, out_file: Optional[str] = None) -> str:
     if out_file is None:
         tmp = tempfile.NamedTemporaryFile(suffix=".png", prefix="maestro_plot_", delete=False)
@@ -387,7 +432,9 @@ def generate_plot(session, plot_code: str, out_file: Optional[str] = None) -> st
         "sample_registry": [s.model_dump() for s in session.sample_registry],
     }
 
+    data_file   = _write_data_file(data_payload)
     full_script = f"{_PLOT_PREAMBLE}\n\n{sanitised_code}\n\n{_PLOT_FOOTER}"
+
     script_file = tempfile.NamedTemporaryFile(
         suffix=".py", prefix="maestro_plot_script_",
         delete=False, mode="w", encoding="utf-8",
@@ -396,8 +443,8 @@ def generate_plot(session, plot_code: str, out_file: Optional[str] = None) -> st
     script_file.close()
 
     env = os.environ.copy()
-    env["MAESTRO_DATA"]     = json.dumps(data_payload)
-    env["MAESTRO_OUT_FILE"] = out_file
+    env["MAESTRO_DATA_FILE"] = data_file
+    env["MAESTRO_OUT_FILE"]  = out_file
 
     try:
         result = subprocess.run(
@@ -406,6 +453,8 @@ def generate_plot(session, plot_code: str, out_file: Optional[str] = None) -> st
             timeout=_PLOT_TIMEOUT_SECONDS, env=env,
         )
         if result.returncode != 0:
+            # Log the actual error so we can diagnose future failures
+            print(f"[PLOT ERROR] Script failed:\n{result.stderr[:1200]}")
             raise RuntimeError(f"Plot script failed:\n{result.stderr[:800]}")
         if not os.path.exists(out_file):
             raise RuntimeError("Plot script ran but did not save output file")
@@ -413,10 +462,11 @@ def generate_plot(session, plot_code: str, out_file: Optional[str] = None) -> st
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Plot script timed out after {_PLOT_TIMEOUT_SECONDS}s")
     finally:
-        try:
-            os.unlink(script_file.name)
-        except Exception:
-            pass
+        for path in (script_file.name, data_file):
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
 
 
 def analyse_data(session, analysis_code: str) -> str:
@@ -425,12 +475,15 @@ def analyse_data(session, analysis_code: str) -> str:
         "sample_registry": [s.model_dump() for s in session.sample_registry],
     }
 
+    data_file = _write_data_file(data_payload)
+
     preamble = textwrap.dedent("""
 import numpy as np
 import json, os
 from scipy import stats
 
-data            = json.loads(os.environ.get("MAESTRO_DATA", "{}"))
+_data_file      = os.environ.get("MAESTRO_DATA_FILE", "")
+data            = json.loads(open(_data_file).read()) if _data_file and os.path.exists(_data_file) else {}
 results_store   = data.get("results_store", [])
 sample_registry = data.get("sample_registry", [])
 """).strip()
@@ -444,7 +497,7 @@ sample_registry = data.get("sample_registry", [])
     script_file.close()
 
     env = os.environ.copy()
-    env["MAESTRO_DATA"] = json.dumps(data_payload)
+    env["MAESTRO_DATA_FILE"] = data_file
 
     try:
         result = subprocess.run(
@@ -453,17 +506,17 @@ sample_registry = data.get("sample_registry", [])
             timeout=_PLOT_TIMEOUT_SECONDS, env=env,
         )
         if result.returncode != 0:
+            print(f"[ANALYSIS ERROR] Script failed:\n{result.stderr[:1200]}")
             raise RuntimeError(f"Analysis script failed:\n{result.stderr[:800]}")
         return result.stdout.strip()
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Analysis script timed out after {_PLOT_TIMEOUT_SECONDS}s")
     finally:
-        try:
-            os.unlink(script_file.name)
-        except Exception:
-            pass
-
-
+        for path in (script_file.name, data_file):
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
 # ── Sample Registry operations ────────────────────────────────────────────────
 
 def synthesise_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -824,23 +877,23 @@ def run_optimise_condition(
 
         write_evaluation(
             condition_name=condition_label,
-            condition_value=condition_value,
-            parameters=param_dict,
+            condition_value=float(condition_value),
+            parameters={k: float(v) for k, v in param_dict.items()},
             objective_name=objective_metric,
-            objective_value=objective_value,
+            objective_value=float(objective_value),
             timestamp=_now(),
         )
 
-        res["X"].append(list(suggestion))
-        res["y"].append(objective_value)
+        res["X"].append([float(v) for v in suggestion])
+        res["y"].append(float(objective_value))
         res["failed_samples"] = failed_samples
         res["attempts"]       = attempts
         res["param_names"]    = [p["name"] for p in free_params]
 
         if best_objective is None or objective_value > best_objective:
             best_objective        = objective_value
-            res["best_objective"] = objective_value
-            res["best_params"]    = dict(param_dict)
+            res["best_objective"] = float(objective_value)
+            res["best_params"] = {k: float(v) for k, v in param_dict.items()}
 
         # Update live iteration counter for frontend progress display
         if step_id:

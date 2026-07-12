@@ -80,9 +80,15 @@ def _load_doc_cache(document_id: str, filename: str) -> DocumentModel | None:
 
 
 def _extract_paper_metadata(markdown: str) -> dict:
+    """
+    Extract authors, year, DOI, and journal from raw markdown text.
+    Handles both comma-delimited author lines and stacked single-name-per-line formats.
+    Generic — no paper-specific content hardcoded.
+    """
     metadata: dict = {}
     search_text = markdown[:8000]
 
+    # ── DOI ──────────────────────────────────────────────────────────────────
     doi_match = re.search(
         r'(?:doi\.org/|doi[:\s/]+)(10\.\d{4,}/[^\s\)\]>,"\']+)',
         search_text, re.IGNORECASE,
@@ -90,8 +96,10 @@ def _extract_paper_metadata(markdown: str) -> dict:
     if doi_match:
         metadata["doi"] = doi_match.group(1).rstrip(".")
 
+    # ── Year ─────────────────────────────────────────────────────────────────
     year_match = re.search(
-        r'(?:published|received|accepted|©|copyright|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+)?\b(20[0-2]\d|19[89]\d)\b',
+        r'(?:published|received|accepted|©|copyright|\b(?:jan|feb|mar|apr|may|jun|'
+        r'jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+)?\b(20[0-2]\d|19[89]\d)\b',
         search_text, re.IGNORECASE,
     )
     if year_match:
@@ -101,6 +109,7 @@ def _extract_paper_metadata(markdown: str) -> dict:
         if fallback:
             metadata["year"] = int(fallback.group(1))
 
+    # ── Journal ───────────────────────────────────────────────────────────────
     for pat in [
         r'(?:journal of|nature|science|physical review|advanced|ACS|RSC|Elsevier|Wiley)[^\n]{3,60}',
         r'(?:published in|journal)[:\s]+([^\n]{5,80})',
@@ -112,18 +121,102 @@ def _extract_paper_metadata(markdown: str) -> dict:
                 metadata["journal"] = candidate
                 break
 
-    for pat in [
-        r'^([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,\s*[A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+){1,})',
-        r'(?:authors?|by)[:\s]+([^\n]{10,200})',
-    ]:
-        m = re.search(pat, search_text[:4000], re.MULTILINE | re.IGNORECASE)
+    # ── Authors ───────────────────────────────────────────────────────────────
+    # Signals that a line is an affiliation, address, or non-author content.
+    AFFILIATION_SIGNALS = re.compile(
+        r'university|institute|college|school|department|laboratory|lab\b|'
+        r'centre|center|faculty|division|'
+        r'road|street|avenue|boulevard|lane|drive|'
+        r'sw\d|ec\d|wc\d|[a-z]{1,2}\d{1,2}\s*\d[a-z]{2}|'  # UK postcodes
+        r'\d{5}|'                                              # US zip codes
+        r'@[a-z]+\.[a-z]+|'                                   # email
+        r'\.ac\.|\.edu|\.org|\.gov|'
+        r'correspondence|contact|lead contact|'
+        r'orcid|https?://',
+        re.IGNORECASE,
+    )
+
+    # A single person name: Firstname [Initial.] Lastname
+    # Must start with capital, contain only letters/hyphens/dots, no digits.
+    SINGLE_NAME = re.compile(
+        r'^[A-Z][a-záàâäãåçéèêëíìîïñóòôöõúùûü][a-záàâäãåçéèêëíìîïñóòôöõúùûü\-]{0,25}'
+        r'(?:\s+[A-Z]\.?)?'
+        r'(?:\s+[A-Z][a-záàâäãåçéèêëíìîïñóòôöõúùûü\-]{1,25})?$',
+        re.UNICODE,
+    )
+
+    def is_affiliation(line: str) -> bool:
+        if AFFILIATION_SIGNALS.search(line):
+            return True
+        # Lines starting with a digit followed by a capital (e.g. "1Polaron, Oxfordshire")
+        if re.match(r'^\d+[A-Z]', line.strip()):
+            return True
+        # Very long lines are abstracts or affiliations
+        if len(line.strip()) > 100:
+            return True
+        return False
+
+    def clean_name(raw: str) -> str:
+        """Strip superscripts, footnote markers, and leading digits from a name token."""
+        cleaned = re.sub(r'[\d\*†‡§¶#,]+$', '', raw.strip())
+        cleaned = re.sub(r'^[\d\*†‡§¶#,]+', '', cleaned).strip()
+        return cleaned
+
+    def is_valid_name(token: str) -> bool:
+        return bool(SINGLE_NAME.match(token)) and 2 < len(token) < 60
+
+    lines = search_text.splitlines()
+    best_authors: list[str] = []
+
+    # ── Strategy 1: comma-delimited author line ───────────────────────────────
+    # e.g. "Steve Kench, Isaac Squires, Amir Dahari, ..."
+    for line in lines[:80]:
+        stripped = line.strip()
+        if not stripped or is_affiliation(stripped):
+            continue
+        parts = re.split(r'[,;]|\band\b', stripped)
+        parts = [clean_name(p) for p in parts if clean_name(p)]
+        if len(parts) < 2:
+            continue
+        valid = [p for p in parts if is_valid_name(p)]
+        if len(valid) >= 2 and len(valid) >= len(parts) * 0.6:
+            if len(valid) > len(best_authors):
+                best_authors = valid[:20]
+
+    # ── Strategy 2: stacked single-name-per-line block ───────────────────────
+    # e.g.:
+    #   Ge Lei
+    #   Dyson School of Design Engineering   ← affiliation, skip
+    #   Imperial College London              ← affiliation, skip
+    #   Samuel J. Cooper
+    # Collect all lines that look like a single person name and are NOT affiliations.
+    if len(best_authors) < 2:
+        stacked: list[str] = []
+        for line in lines[:120]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if is_affiliation(stripped):
+                continue
+            candidate = clean_name(stripped)
+            if is_valid_name(candidate):
+                stacked.append(candidate)
+
+        # Accept the stacked list if we found at least 2 names
+        if len(stacked) >= 2 and len(stacked) > len(best_authors):
+            best_authors = stacked[:20]
+
+    # ── Strategy 3: "Authors:" prefix ────────────────────────────────────────
+    if len(best_authors) < 2:
+        m = re.search(r'(?:authors?|by)[:\s]+([^\n]{10,200})', search_text[:4000], re.IGNORECASE)
         if m:
-            raw   = m.group(1).strip()
-            parts = re.split(r'[;]|,\s*(?:and\s+)?|\s+and\s+', raw)
-            authors = [p.strip() for p in parts if 2 < len(p.strip()) < 60]
-            if len(authors) >= 2:
-                metadata["authors"] = authors[:20]
-                break
+            parts = re.split(r'[;,]|\s+and\s+', m.group(1))
+            valid = [clean_name(p) for p in parts if is_valid_name(clean_name(p))]
+            if len(valid) >= 2:
+                best_authors = valid[:20]
+
+    if best_authors:
+        metadata["authors"] = best_authors
 
     return metadata
 

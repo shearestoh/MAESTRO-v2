@@ -131,11 +131,12 @@ function groupSteps(
 export function LiveWorkflowCanvas() {
   const state    = useMaestroStore((s) => s.state);
   const bgActive = state?.background_job_active ?? false;
+  const bgStatus = state?.background_job_status ?? "idle";
   const pending  = state?.pending_plan;
 
   const rawPlan: WorkflowStep[] = useMemo(() => {
     if (pending) return pending.steps;
-    if (state?.background_job_plan) {
+    if (state?.background_job_plan?.length) {
       return state.background_job_plan as unknown as WorkflowStep[];
     }
     return [];
@@ -151,6 +152,19 @@ export function LiveWorkflowCanvas() {
 
   const hasContent = groups.length > 0 || singles.length > 0;
 
+  // Determine display mode
+  const isRunning   = bgActive;
+  const isCompleted = !bgActive && bgStatus === "completed" && rawPlan.length > 0;
+  const isPending   = !!pending;
+
+  const headerLabel = isPending
+    ? "Proposed Workflow"
+    : isRunning
+    ? "Live Workflow"
+    : isCompleted
+    ? "Completed Workflow"
+    : "Workflow";
+
   if (!hasContent) {
     return (
       <div className="w-full h-full flex items-center justify-center">
@@ -161,20 +175,22 @@ export function LiveWorkflowCanvas() {
 
   return (
     <div className="w-full h-full overflow-y-auto p-3 space-y-2">
-
-      {/* Header */}
       <div className="flex items-center justify-between shrink-0">
         <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
-          {pending ? "Proposed Workflow" : "Live Workflow"}
+          {headerLabel}
         </div>
-        {bgActive && (
+        {isRunning && (
           <span className="text-[10px] text-blue-600 font-mono animate-pulse">
             RUNNING
           </span>
         )}
+        {isCompleted && (
+          <span className="text-[10px] text-green-600 font-mono">
+            DONE
+          </span>
+        )}
       </div>
 
-      {/* Non-BO steps */}
       {singles.map((step) => (
         <SingleStepNode
           key={step.step_id ?? step.kind}
@@ -183,7 +199,6 @@ export function LiveWorkflowCanvas() {
         />
       ))}
 
-      {/* BO / optimisation groups */}
       {groups.map((group) => (
         <ConditionGroupNode
           key={`${group.condition}|${group.optimiserName ?? ""}`}
