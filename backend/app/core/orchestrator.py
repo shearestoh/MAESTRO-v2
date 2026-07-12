@@ -8,7 +8,7 @@ from typing import Dict
 import re
 
 from app.core.database import ensure_db, query_database, reset_evaluations
-from app.core.llm import llm_plan, _NON_INSTRUMENT_ACTIONS
+from app.core.llm import llm_plan, _NON_INSTRUMENT_ACTIONS, _sweep_unanswered_tool_calls
 from app.core.models import (
     AgentStateModel,
     ArtifactModel,
@@ -57,8 +57,8 @@ def _welcome_message() -> dict:
 
 def create_session() -> SessionModel:
     ensure_db()
-    session_id  = str(uuid.uuid4())
-    session     = SessionModel(
+    session_id = str(uuid.uuid4())
+    session    = SessionModel(
         session_id=session_id,
         agent_state=AgentStateModel(messages=[_welcome_message()]),
         current_mission="Awaiting instruction.",
@@ -87,8 +87,7 @@ def _plan_requires_approval(plan: list) -> bool:
 def _append_tool_response(session: SessionModel, tool_call_id: str, name: str, content: str) -> None:
     """
     Insert a tool response message immediately after the assistant message
-    that contains the matching tool_call_id.
-    Searches the full message history — does not stop at user messages.
+    that contains the matching tool_call_id. Searches the full message history.
     """
     messages = session.agent_state.messages
     for i, msg in enumerate(messages):
@@ -99,15 +98,12 @@ def _append_tool_response(session: SessionModel, tool_call_id: str, name: str, c
         ids = {tc.get("id") for tc in msg["tool_calls"]}
         if tool_call_id not in ids:
             continue
-        # Check if a response already exists for this tool_call_id
         already_responded = any(
             m.get("role") == "tool" and m.get("tool_call_id") == tool_call_id
-            for m in messages[i+1:]
+            for m in messages[i + 1:]
         )
         if already_responded:
             return
-        # Find the right insertion point: after the assistant message and
-        # any existing tool responses that belong to the same assistant message
         insert_at = i + 1
         while insert_at < len(messages) and messages[insert_at].get("role") == "tool":
             insert_at += 1
@@ -120,38 +116,6 @@ def _append_tool_response(session: SessionModel, tool_call_id: str, name: str, c
         return
     print(f"[WARN] Could not find assistant message for tool_call_id={tool_call_id}, name={name}")
 
-
-def _sweep_unanswered_tool_calls(messages: list) -> None:
-    """
-    Inject synthetic tool responses for any tool_call_id that was never answered.
-    Accepts the messages list directly. Mutates in place.
-    Prevents HTTP 400 from the OpenAI API on subsequent turns.
-    """
-    responded = {
-        m["tool_call_id"]
-        for m in messages
-        if m.get("role") == "tool" and m.get("tool_call_id")
-    }
-    injections = []
-    for i, msg in enumerate(messages):
-        if msg.get("role") != "assistant":
-            continue
-        for tc in msg.get("tool_calls", []):
-            tc_id   = tc.get("id")
-            tc_name = tc.get("function", {}).get("name", "unknown")
-            if tc_id and tc_id not in responded:
-                injections.append((i + 1, {
-                    "role":         "tool",
-                    "tool_call_id": tc_id,
-                    "name":         tc_name,
-                    "content":      json.dumps({
-                        "status":  "completed",
-                        "message": f"Tool '{tc_name}' executed.",
-                    }),
-                }))
-                responded.add(tc_id)
-    for insert_idx, tool_msg in reversed(injections):
-        messages.insert(insert_idx, tool_msg)
 
 def post_user_message(session_id: str, text: str) -> SessionModel:
     session = get_session(session_id)
@@ -175,7 +139,7 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
             payload={},
         ))
 
-    llm_plan(session)  # _sweep_unanswered_tool_calls now called inside llm_plan
+    llm_plan(session)
 
     if session.agent_state.awaiting_confirmation:
         pending_calls = list(session.agent_state.pending_tool_calls)
@@ -198,24 +162,16 @@ def post_user_message(session_id: str, text: str) -> SessionModel:
             payload={},
         ))
 
-    # Final sweep: ensure no unanswered tool calls remain before next user turn
+    # Final sweep before next user turn
     _sweep_unanswered_tool_calls(session.agent_state.messages)
 
     return session
 
+
 def _normalise_metric_name(name: str) -> str:
-    """
-    Strip units, parentheses, and whitespace from a metric name for comparison.
-    e.g. "specific_energy(Wh/kg)" -> "specific_energy"
-         "Specific Energy [Wh/kg]" -> "specific_energy"
-    """
-    # Remove anything in parentheses or brackets (units)
     cleaned = re.sub(r'[\(\[\{][^\)\]\}]*[\)\]\}]', '', name)
-    # Lowercase and replace spaces/hyphens with underscores
     cleaned = re.sub(r'[\s\-]+', '_', cleaned.strip().lower())
-    # Remove trailing underscores
-    cleaned = cleaned.strip('_')
-    return cleaned
+    return cleaned.strip('_')
 
 
 def _check_plan_feasibility(session: SessionModel, steps: list) -> str | None:
@@ -249,7 +205,6 @@ def _check_plan_feasibility(session: SessionModel, steps: list) -> str | None:
     if not required_params and not required_outputs:
         return None
 
-    # Normalise names before feasibility check to handle units in parentheses
     controllable    = {_normalise_metric_name(p) for p in TOOL_REGISTRY.all_controllable_parameters()}
     measurable      = {_normalise_metric_name(o) for o in TOOL_REGISTRY.all_measurable_outputs()}
     missing_params  = [p for p in required_params  if _normalise_metric_name(p) not in controllable]
@@ -394,14 +349,8 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
             result = {"status": "error", "message": str(e)}
         tool_results.append((kind, result))
 
-        if kind == "generate_plot" and result.get("status") == "ok":
-            session.agent_state.messages.append({
-                "role":    "assistant",
-                "content": f"Here is the summary figure:\n\n![Summary](/api/plot/{session.session_id})",
-            })
-
-    # Append tool responses immediately — before any follow-up LLM call.
-    # Use a single combined result so each pending call gets answered.
+    # CRITICAL: Insert ALL tool responses BEFORE any follow-up LLM call.
+    # This prevents the HTTP 400 "tool_calls must be followed by tool messages" error.
     summary_result = json.dumps(
         {"status": "ok", "results": [r for _, r in tool_results]}, default=str
     )
@@ -410,12 +359,22 @@ def _execute_non_instrument_actions(session, lock, plan, pending_calls):
             session, tc["id"], tc["function"]["name"], summary_result
         )
 
-    # Only do a follow-up LLM call for database/sample queries that need interpretation.
+    # Handle plot display after tool responses are anchored in message history
+    for kind, result in tool_results:
+        if kind == "generate_plot" and result.get("status") == "ok":
+            session.agent_state.messages.append({
+                "role":    "assistant",
+                "content": f"Here is the summary figure:\n\n![Summary](/api/plot/{session.session_id})",
+            })
+
+    # Follow-up LLM call only for queries needing interpretation
     needs_followup = any(
         kind in ("query_database", "list_samples")
         for kind, _ in tool_results
     )
     if needs_followup:
+        # Sweep before follow-up to guarantee clean history
+        _sweep_unanswered_tool_calls(session.agent_state.messages)
         with lock:
             session.equipment_status.llm = True
             session.current_activity     = "Interpreting results..."
@@ -629,6 +588,7 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
         ).start()
 
     else:
+        # Abort path — sweep BEFORE follow-up LLM call
         with lock:
             for tc in session.agent_state.pending_tool_calls:
                 _append_tool_response(
@@ -641,6 +601,8 @@ def confirm_pending(session_id: str, proceed: bool) -> SessionModel:
             session.pending_plan                      = None
             session.equipment_status.llm              = True
 
+        # Sweep before follow-up to prevent HTTP 400
+        _sweep_unanswered_tool_calls(session.agent_state.messages)
         llm_plan(session)
 
         with lock:
@@ -696,7 +658,6 @@ def _run_background_job(session_id: str) -> None:
             session.current_activity      = None
             session.equipment_status      = EquipmentStatusModel()
             session.pending_plan          = None
-            # Keep projected_schedule intact so the Gantt shows actual vs projected
 
             if not success:
                 session.background_job_error = error_msg
@@ -712,7 +673,10 @@ def _run_background_job(session_id: str) -> None:
                 results  = session.agent_state.results_store
                 n_evals  = sum(len(r.get("X", [])) for r in results)
                 n_fails  = sum(r.get("failed_samples", 0) for r in results)
-                best_obj = max((r.get("best_objective") or 0.0 for r in results), default=0.0)
+                best_obj = max(
+                    (r["best_objective"] for r in results if r.get("best_objective") is not None),
+                    default=None,
+                )
                 obj_label = (
                     session.extracted_campaign.objective_metric
                     if session.extracted_campaign else "objective"
@@ -731,13 +695,14 @@ def _run_background_job(session_id: str) -> None:
                         "content": f"Here is the summary figure:\n\n![Summary](/api/plot/{session.session_id})",
                     })
                 elif n_evals > 0:
+                    best_str = f"{best_obj:.4f}" if best_obj is not None else "N/A"
                     session.agent_state.messages.append({
                         "role": "assistant",
                         "content": (
                             f"✅ **Workflow complete.**\n\n"
                             f"| Metric | Value |\n|--------|-------|\n"
                             f"| Experiments run | {n_evals} |\n"
-                            f"| Best {obj_label} | {best_obj:.4f} |\n"
+                            f"| Best {obj_label} | {best_str} |\n"
                             f"| Failed steps | {n_fails} |\n"
                             f"| Conditions completed | {', '.join(conds_done) or 'none'} |\n\n"
                             f"Ask me to **generate a summary figure** or **analyse the results**."
@@ -772,7 +737,9 @@ def _run_background_job(session_id: str) -> None:
                 set_step_status(step_id, status)
             except Exception as step_err:
                 with lock:
-                    session.activity_log.append(f"[WARNING] Step '{step.get('kind')}' error: {step_err}")
+                    session.activity_log.append(
+                        f"[WARNING] Step '{step.get('kind')}' error: {step_err}"
+                    )
                     session.activity_log = session.activity_log[-50:]
                 set_step_status(step_id, "failed")
 

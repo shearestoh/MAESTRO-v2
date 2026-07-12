@@ -46,6 +46,13 @@ try:
 except (ImportError, Exception):
     pass
 
+try:
+    from app.optimisers.llm_bo import MAESTROLLMOptimiser
+    OPTIMISER_CATALOGUE["llm_bo"]    = MAESTROLLMOptimiser
+    OPTIMISER_CATALOGUE["oracle_bo"] = MAESTROLLMOptimiser
+except Exception:
+    pass
+
 
 def get_optimiser(name: str) -> BaseOptimiser:
     """
@@ -70,6 +77,10 @@ def get_optimiser(name: str) -> BaseOptimiser:
         "evolution":      "deap",
         "evolutionary":   "deap",
         "genetic":        "deap",
+        "llm":       "llm_bo",
+        "oracle":    "llm_bo",
+        "llm-bo":    "llm_bo",
+        "oracle-bo": "llm_bo",
     }
     normalised = aliases.get(name.lower().strip(), name.lower().strip())
 

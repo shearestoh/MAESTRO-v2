@@ -6,13 +6,13 @@ The engine is instrument-agnostic: it reads instrument definitions from
 the registry and dispatches to the appropriate adapter.
 
 Step kinds:
-  synthesise        — prepare a physical sample
-  characterise      — measure a prepared sample
+  synthesise         — prepare a physical sample
+  characterise       — measure a prepared sample
   optimise_condition — closed-loop Bayesian optimisation
-  generate_plot     — matplotlib figure generation (subprocess-isolated)
-  analyse_data      — numpy/scipy analysis (subprocess-isolated)
-  query_database    — read-only SQL query
-  list_samples      — sample registry lookup
+  generate_plot      — matplotlib figure generation (subprocess-isolated)
+  analyse_data       — numpy/scipy analysis (subprocess-isolated)
+  query_database     — read-only SQL query
+  list_samples       — sample registry lookup
 """
 from __future__ import annotations
 
@@ -105,7 +105,6 @@ def _apply_instrument_delay(instrument_name: str, time_cost_seconds: float) -> N
         _time.sleep(time_cost_seconds)
 
 
-
 # ── Results store helpers ─────────────────────────────────────────────────────
 
 def get_or_create_result_for_condition(
@@ -114,10 +113,6 @@ def get_or_create_result_for_condition(
     condition_value: float,
     optimiser_name:  str = "",
 ) -> dict:
-    """
-    Find an existing result entry matching condition + optimiser, or create a new one.
-    Each (condition, optimiser) pair gets its own entry, allowing comparison across methods.
-    """
     for r in results_store:
         if (
             r.get("condition_label") == condition_label
@@ -130,7 +125,7 @@ def get_or_create_result_for_condition(
     return entry
 
 
-def _log_resource(session, instrument_name: str, start_time: str, end_time: str):
+def _log_resource(session, instrument_name: str, start_time: str, end_time: str) -> None:
     session.resource_log.append({
         "instrument": instrument_name,
         "start_time": start_time,
@@ -138,12 +133,12 @@ def _log_resource(session, instrument_name: str, start_time: str, end_time: str)
     })
     session.resource_log = session.resource_log[-500:]
 
+
 def _deduct_resources(session, instrument_name: str) -> None:
-    """Deduct consumables from SQLite and alert on low stock."""
     try:
         from app.core.database import get_all_resources, update_resource_stock
         resources = get_all_resources()
-        warnings  = []
+        warnings: list[str] = []
         for resource in resources:
             for rule in resource.get("consumption_rules", []):
                 if rule.get("instrument_name") == instrument_name:
@@ -213,17 +208,11 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
             return TOOL_REGISTRY.get_time_cost(char_list[0].name, default=8.0) if char_list else 8.0
         return 0.0
 
-    # step_id → projected end time (for explicit dependency resolution)
     step_end:        Dict[str, dt] = {}
-    # instrument_id → next available time (for instrument contention)
     instrument_free: Dict[str, dt] = {}
-    # Global cursor: end time of the most recently scheduled step.
-    # Used as implicit predecessor when no explicit deps are declared,
-    # preserving the sequential ordering the LLM encoded in the plan.
-    global_cursor: dt = now
+    global_cursor:   dt            = now
 
     entries: List[ProjectedScheduleEntry] = []
-
     skip_instrument_ids = {"optimiser", "memory", "reporting", "knowledge", "unknown", ""}
 
     for step in plan:
@@ -231,13 +220,10 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
         kind    = step.get("kind", "")
         deps    = step.get("dependencies") or []
 
-        # Resolve explicit dependency end times
-        if deps:
-            dep_end = max((step_end.get(dep_id, now) for dep_id in deps), default=now)
-        else:
-            # No explicit deps: use global cursor to preserve plan ordering.
-            # This ensures "synthesise all, then characterise all" projects correctly.
-            dep_end = global_cursor
+        dep_end = (
+            max((step_end.get(dep_id, now) for dep_id in deps), default=now)
+            if deps else global_cursor
+        )
 
         if kind == "optimise_condition":
             n_calls = int(step.get("n_calls") or 10)
@@ -250,9 +236,7 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
             char_time  = TOOL_REGISTRY.get_time_cost(char_name,  default=8.0)
 
             label_base = step.get("label", "Optimisation")
-            # BO pipeline: synthesise → characterise → synthesise → characterise ...
-            # Each iteration pipelines: char(i) and synth(i+1) can overlap.
-            cursor = max(dep_end, instrument_free.get("optimiser", now), now)
+            cursor     = max(dep_end, instrument_free.get("optimiser", now), now)
 
             for i in range(n_calls):
                 synth_start = max(cursor, instrument_free.get(synth_name, now))
@@ -285,7 +269,6 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
             step["projected_end_time"]   = to_iso(cursor)
 
         else:
-            # Resolve physical instrument name
             explicit_instrument = step.get("instrument", "")
             if not explicit_instrument:
                 if kind == "synthesise":
@@ -299,16 +282,13 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
             instrument_name = explicit_instrument or instrument_id
             duration_s      = get_duration(step, resolved_instrument=instrument_name)
 
-            # Start = max(dep_end [or global_cursor], instrument_free, now)
             inst_free  = instrument_free.get(instrument_id, now)
             proj_start = max(dep_end, inst_free, now)
             proj_end   = proj_start + timedelta(seconds=duration_s)
 
             step_end[step_id]              = proj_end
             instrument_free[instrument_id] = proj_end
-            # Advance global cursor so the next step (if no explicit deps)
-            # starts after this one completes.
-            global_cursor = max(global_cursor, proj_end)
+            global_cursor                  = max(global_cursor, proj_end)
 
             step["projected_start_time"] = to_iso(proj_start)
             step["projected_end_time"]   = to_iso(proj_end)
@@ -325,85 +305,11 @@ def compute_projected_schedule(plan: List[dict]) -> List[ProjectedScheduleEntry]
     return entries
 
 
-# ── Dynamic plotting ──────────────────────────────────────────────────────────
+# ── Subprocess plot/analysis helpers ─────────────────────────────────────────
 
 _PLOT_TIMEOUT_SECONDS = 30
 
-_PLOT_PREAMBLE = textwrap.dedent("""
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
-import json, sys, os
-
-data            = json.loads(os.environ.get("MAESTRO_DATA", "{}"))
-results_store   = data.get("results_store", [])
-sample_registry = data.get("sample_registry", [])
-out_file        = os.environ.get("MAESTRO_OUT_FILE", "/tmp/maestro_plot.png")
-""").strip()
-
-_PLOT_FOOTER = textwrap.dedent("""
-plt.tight_layout()
-plt.savefig(out_file, dpi=150, bbox_inches="tight")
-plt.close("all")
-print(f"SAVED:{out_file}")
-""").strip()
-
-
-import re as _re
-
-def _sanitise_plot_code(code: str) -> str:
-    """
-    Remove calls that conflict with the script footer:
-    plt.savefig, plt.show, plt.close, plt.tight_layout.
-    These are injected by the footer to ensure consistent output.
-    """
-    lines = []
-    for line in code.splitlines():
-        stripped = line.strip()
-        if _re.match(
-            r'plt\.(savefig|show|close|tight_layout)\s*\(',
-            stripped,
-        ):
-            continue
-        lines.append(line)
-    return "\n".join(lines)
-
-
-class _NumpyEncoder(json.JSONEncoder):
-    """JSON encoder that handles numpy scalars and arrays cleanly."""
-    def default(self, obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        if isinstance(obj, (np.integer,)):
-            return int(obj)
-        if isinstance(obj, (np.floating,)):
-            return float(obj)
-        if isinstance(obj, (np.bool_,)):
-            return bool(obj)
-        return super().default(obj)
-
-
-def _serialise(data) -> str:
-    """Serialise data containing possible numpy types to a JSON string."""
-    return json.dumps(data, cls=_NumpyEncoder)
-
-
-def _write_data_file(data: dict) -> str:
-    """
-    Write serialised data to a temp file and return the path.
-    Using a file avoids env-var size limits for large result sets.
-    """
-    tmp = tempfile.NamedTemporaryFile(
-        suffix=".json", prefix="maestro_data_",
-        delete=False, mode="w", encoding="utf-8",
-    )
-    tmp.write(_serialise(data))
-    tmp.close()
-    return tmp.name
-
-
-# Updated preamble — reads from file instead of env var
+# Single canonical preamble — reads data from a temp file to avoid env-var size limits
 _PLOT_PREAMBLE = textwrap.dedent("""
 import matplotlib
 matplotlib.use("Agg")
@@ -418,6 +324,52 @@ sample_registry = data.get("sample_registry", [])
 out_file        = os.environ.get("MAESTRO_OUT_FILE", "/tmp/maestro_plot.png")
 """).strip()
 
+_PLOT_FOOTER = textwrap.dedent("""
+plt.tight_layout()
+plt.savefig(out_file, dpi=150, bbox_inches="tight")
+plt.close("all")
+""").strip()
+
+import re as _re
+
+
+def _sanitise_plot_code(code: str) -> str:
+    """Remove calls that conflict with the script footer."""
+    lines = []
+    for line in code.splitlines():
+        stripped = line.strip()
+        if _re.match(r'plt\.(savefig|show|close|tight_layout)\s*\(', stripped):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+class _NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        return super().default(obj)
+
+
+def _serialise(data) -> str:
+    return json.dumps(data, cls=_NumpyEncoder)
+
+
+def _write_data_file(data: dict) -> str:
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=".json", prefix="maestro_data_",
+        delete=False, mode="w", encoding="utf-8",
+    )
+    tmp.write(_serialise(data))
+    tmp.close()
+    return tmp.name
+
 
 def generate_plot(session, plot_code: str, out_file: Optional[str] = None) -> str:
     if out_file is None:
@@ -426,12 +378,10 @@ def generate_plot(session, plot_code: str, out_file: Optional[str] = None) -> st
         tmp.close()
 
     sanitised_code = _sanitise_plot_code(plot_code)
-
-    data_payload = {
+    data_payload   = {
         "results_store":   session.agent_state.results_store,
         "sample_registry": [s.model_dump() for s in session.sample_registry],
     }
-
     data_file   = _write_data_file(data_payload)
     full_script = f"{_PLOT_PREAMBLE}\n\n{sanitised_code}\n\n{_PLOT_FOOTER}"
 
@@ -453,7 +403,6 @@ def generate_plot(session, plot_code: str, out_file: Optional[str] = None) -> st
             timeout=_PLOT_TIMEOUT_SECONDS, env=env,
         )
         if result.returncode != 0:
-            # Log the actual error so we can diagnose future failures
             print(f"[PLOT ERROR] Script failed:\n{result.stderr[:1200]}")
             raise RuntimeError(f"Plot script failed:\n{result.stderr[:800]}")
         if not os.path.exists(out_file):
@@ -474,7 +423,6 @@ def analyse_data(session, analysis_code: str) -> str:
         "results_store":   session.agent_state.results_store,
         "sample_registry": [s.model_dump() for s in session.sample_registry],
     }
-
     data_file = _write_data_file(data_payload)
 
     preamble = textwrap.dedent("""
@@ -517,6 +465,8 @@ sample_registry = data.get("sample_registry", [])
                 os.unlink(path)
             except Exception:
                 pass
+
+
 # ── Sample Registry operations ────────────────────────────────────────────────
 
 def synthesise_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -576,7 +526,7 @@ def synthesise_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, A
     )
     session.sample_registry.append(new_sample)
     context[produces] = sample_id
-    _deduct_resources(session, instrument) 
+    _deduct_resources(session, instrument)
 
     session.live_event_queue.append(ExecutionEvent(
         event_type="synthesiser_done",
@@ -585,12 +535,13 @@ def synthesise_step(session, step: dict, context: Dict[str, Any]) -> Dict[str, A
         category="execution",
         payload={"sample_id": sample_id, "params": params},
     ))
+    # Emit assistant message so user sees synthesis result in chat
     session.agent_state.messages.append({
         "role":    "assistant",
         "content": (
             f"✅ **Sample `{sample_id}` synthesised**\n\n"
             + "\n".join(f"- **{k}:** {v}" for k, v in params.items())
-            + f"\n\nStored in lab inventory."
+            + "\n\nStored in lab inventory."
         ),
     })
     return {"status": "ok", "sample_id": sample_id, "params": params}
@@ -685,7 +636,6 @@ def characterise_step(session, step: dict, context: Dict[str, Any]) -> Dict[str,
 
 
 def list_samples_step(session) -> Dict[str, Any]:
-    """Return sample inventory as structured data — do NOT append assistant message directly."""
     samples = session.sample_registry
     if not samples:
         return {
@@ -715,10 +665,6 @@ def run_optimise_condition(
     step:          dict,
     results_store: List[dict],
 ) -> Dict[str, Any]:
-    """
-    Execute a closed-loop Bayesian optimisation campaign.
-    Runs synchronously, emitting live events to session.live_event_queue.
-    """
     condition_label     = step.get("condition_label") or "condition"
     condition_value_raw = step.get("condition_value")
     condition_value     = float(condition_value_raw) if condition_value_raw is not None else 0.0
@@ -732,7 +678,7 @@ def run_optimise_condition(
     if not free_params:
         session.live_event_queue.append(ExecutionEvent(
             event_type="optimiser_error",
-            message="BO step has no free parameters defined. Please specify parameters to optimise.",
+            message="BO step has no free parameters defined.",
             equipment="optimiser",
             category="planning",
             payload={},
@@ -770,10 +716,7 @@ def run_optimise_condition(
     ))
 
     res = get_or_create_result_for_condition(
-        results_store,
-        condition_label,
-        condition_value,
-        optimiser_name=optimiser_name,
+        results_store, condition_label, condition_value, optimiser_name=optimiser_name,
     )
     if not res.get("param_names"):
         res["param_names"] = [p["name"] for p in free_params]
@@ -893,9 +836,8 @@ def run_optimise_condition(
         if best_objective is None or objective_value > best_objective:
             best_objective        = objective_value
             res["best_objective"] = float(objective_value)
-            res["best_params"] = {k: float(v) for k, v in param_dict.items()}
+            res["best_params"]    = {k: float(v) for k, v in param_dict.items()}
 
-        # Update live iteration counter for frontend progress display
         if step_id:
             session.bo_iteration_counts[step_id] = successes
 
@@ -1063,17 +1005,8 @@ def execute_plan_step(
         ))
         plot_code = step.get("plot_code", "") or _default_summary_plot_code()
 
-        def _try_plot(code: str) -> str | None:
-            try:
-                return generate_plot(session, code)
-            except Exception:
-                return None
-
-        fig_path = _try_plot(plot_code)
-        if fig_path is None and plot_code != _default_summary_plot_code():
-            fig_path = _try_plot(_default_summary_plot_code())
-
-        if fig_path:
+        try:
+            fig_path = generate_plot(session, plot_code)
             session.show_plotter_image = fig_path
             session.live_event_queue.append(ExecutionEvent(
                 event_type="plotter_done",
@@ -1083,19 +1016,24 @@ def execute_plan_step(
                 payload={},
             ))
             return {"status": "ok", "figure_path": fig_path}
-        else:
+        except Exception as e:
+            error_msg = str(e)[:400]
+            # Tell the agent what went wrong so it can try a different approach
             session.agent_state.messages.append({
                 "role":    "assistant",
-                "content": "⚠️ Figure generation failed. Try asking for a simpler plot or check that there are results to display.",
+                "content": (
+                    f"⚠️ Figure generation failed: `{error_msg}`\n\n"
+                    "Please describe a different plot or ask me to generate a basic summary."
+                ),
             })
             session.live_event_queue.append(ExecutionEvent(
                 event_type="plotter_fail",
-                message="Figure generation failed.",
+                message=f"Figure generation failed: {error_msg[:80]}",
                 equipment="reporting",
                 category="reporting",
-                payload={},
+                payload={"error": error_msg},
             ))
-            return {"status": "error", "message": "Figure generation failed"}
+            return {"status": "error", "message": error_msg}
 
     if kind == "analyse_data":
         session.live_event_queue.append(ExecutionEvent(
@@ -1142,9 +1080,6 @@ def execute_plan_step(
 
 def _default_summary_plot_code() -> str:
     return textwrap.dedent("""
-# Generic summary plot — adapts to whatever data is available.
-# Inspects results_store structure at runtime; never assumes field names.
-
 import math
 
 def safe_float(v):
@@ -1157,33 +1092,30 @@ if not results_store:
             transform=ax.transAxes, fontsize=12, color="#94a3b8")
     ax.set_axis_off()
 else:
-    # ── Discover data structure dynamically ──────────────────────────────────
     all_param_names = []
     for r in results_store:
         for p in r.get("param_names", []):
             if p not in all_param_names:
                 all_param_names.append(p)
 
-    has_X         = any(len(r.get("X", [])) > 0 for r in results_store)
-    has_y         = any(len(r.get("y", [])) > 0 for r in results_store)
-    has_best      = any(r.get("best_objective") is not None for r in results_store)
-    n_params      = len(all_param_names)
-    n_results     = len(results_store)
-    cond_label    = results_store[0].get("condition_label", "condition") if results_store else "condition"
-    optimisers    = list(dict.fromkeys(r.get("optimiser_name", "") for r in results_store))
+    has_y     = any(len(r.get("y", [])) > 0 for r in results_store)
+    has_best  = any(r.get("best_objective") is not None for r in results_store)
+    n_params  = len(all_param_names)
+    n_results = len(results_store)
+    cond_label = results_store[0].get("condition_label", "condition") if results_store else "condition"
+    optimisers = list(dict.fromkeys(r.get("optimiser_name", "") for r in results_store))
 
-    # ── Layout: decide number of panels ──────────────────────────────────────
     panels = []
     if has_y:
-        panels.append("convergence")   # best-so-far vs iteration
+        panels.append("convergence")
     if has_best and n_results > 1:
-        panels.append("optimality")    # best objective vs condition
-    if has_X and n_params >= 2:
-        panels.append("scatter_2d")    # 2D parameter space coloured by objective
-    if has_X and n_params == 1:
-        panels.append("scatter_1d")    # 1D: param vs objective
+        panels.append("optimality")
+    if has_y and n_params >= 2:
+        panels.append("scatter_2d")
+    if has_y and n_params == 1:
+        panels.append("scatter_1d")
     if not panels:
-        panels.append("summary_text")  # fallback: text summary
+        panels.append("summary_text")
 
     n_cols = min(3, len(panels))
     n_rows = math.ceil(len(panels) / n_cols)
@@ -1195,18 +1127,15 @@ else:
         ax = axes_flat[panel_idx]
 
         if panel == "convergence":
-            # Best-so-far vs iteration for each (condition, optimiser) pair
             for ri, r in enumerate(results_store):
                 y_vals = r.get("y", [])
                 if not y_vals:
                     continue
                 best_so_far = [max(y_vals[:i+1]) for i in range(len(y_vals))]
-                cval        = r.get("condition_value", ri)
-                opt_name    = r.get("optimiser_name", "")
-                lbl         = f"{cond_label}={cval}"
-                if opt_name:
-                    lbl += f" [{opt_name}]"
-                col = palette[ri % len(palette)]
+                cval     = r.get("condition_value", ri)
+                opt_name = r.get("optimiser_name", "")
+                lbl      = f"{cond_label}={cval}" + (f" [{opt_name}]" if opt_name else "")
+                col      = palette[ri % len(palette)]
                 ax.plot(range(1, len(best_so_far) + 1), best_so_far,
                         "o-", color=col, linewidth=1.8, markersize=4, label=lbl, alpha=0.85)
             ax.set_title("Convergence (best so far)", fontsize=9)
@@ -1216,7 +1145,6 @@ else:
             ax.grid(True, alpha=0.25)
 
         elif panel == "optimality":
-            # Best objective vs condition value, grouped by optimiser
             for oi, opt_name in enumerate(optimisers):
                 opt_results = sorted(
                     [r for r in results_store
@@ -1229,9 +1157,8 @@ else:
                 xs  = [safe_float(r.get("condition_value", 0)) or 0 for r in opt_results]
                 ys  = [r["best_objective"] for r in opt_results]
                 col = palette[oi % len(palette)]
-                lbl = opt_name or "unknown"
                 ax.plot(xs, ys, "o-", color=col, linewidth=2, markersize=8,
-                        label=lbl, alpha=0.85)
+                        label=opt_name or "unknown", alpha=0.85)
             ax.set_title("Optimality path", fontsize=9)
             ax.set_xlabel(cond_label, fontsize=8)
             ax.set_ylabel("Best objective", fontsize=8)
@@ -1239,12 +1166,10 @@ else:
             ax.grid(True, alpha=0.25)
 
         elif panel == "scatter_2d":
-            # First two parameters coloured by objective, one subplot per result
-            # If multiple results, show the first one that has data
             plotted = False
             for ri, r in enumerate(results_store):
-                X_raw = r.get("X", [])
-                y_raw = r.get("y", [])
+                X_raw   = r.get("X", [])
+                y_raw   = r.get("y", [])
                 p_names = r.get("param_names", all_param_names)
                 if not X_raw or not y_raw or len(p_names) < 2:
                     continue
@@ -1252,37 +1177,36 @@ else:
                 y = np.array(y_raw)
                 if X.ndim != 2 or X.shape[1] < 2:
                     continue
-                sc = ax.scatter(X[:, 0], X[:, 1], c=y, cmap="plasma", s=40, alpha=0.8)
+                cval = r.get("condition_value", ri)
+                sc   = ax.scatter(X[:, 0], X[:, 1], c=y, cmap="plasma", s=40, alpha=0.75,
+                                  label=f"{cond_label}={cval}")
                 bp = r.get("best_params", {})
                 bx = safe_float(bp.get(p_names[0]))
                 by = safe_float(bp.get(p_names[1]))
                 if bx is not None and by is not None:
-                    ax.scatter([bx], [by], facecolors="none", edgecolors="black",
-                               s=120, linewidths=1.5, zorder=5, label="Best")
-                    ax.legend(fontsize=7)
-                cval = r.get("condition_value", ri)
-                ax.set_title(f"{cond_label}={cval}", fontsize=9)
-                ax.set_xlabel(p_names[0], fontsize=8)
-                ax.set_ylabel(p_names[1], fontsize=8)
-                fig.colorbar(sc, ax=ax).set_label("Objective", fontsize=7)
+                    ax.scatter([bx], [by], marker="*", s=200, c="black", zorder=5)
                 plotted = True
-                break  # one panel for 2D scatter
-            if not plotted:
+            if plotted:
+                ax.set_title("Parameter Space", fontsize=9)
+                ax.set_xlabel(all_param_names[0] if all_param_names else "param 0", fontsize=8)
+                ax.set_ylabel(all_param_names[1] if len(all_param_names) > 1 else "param 1", fontsize=8)
+                ax.legend(fontsize=6)
+                fig.colorbar(sc, ax=ax).set_label("Objective", fontsize=7)
+            else:
                 ax.set_axis_off()
                 ax.text(0.5, 0.5, "Insufficient data for 2D scatter",
                         ha="center", va="center", transform=ax.transAxes, fontsize=8, color="#94a3b8")
 
         elif panel == "scatter_1d":
-            # Single parameter vs objective
             for ri, r in enumerate(results_store):
                 X_raw   = r.get("X", [])
                 y_raw   = r.get("y", [])
                 p_names = r.get("param_names", all_param_names)
                 if not X_raw or not y_raw:
                     continue
-                X   = np.array(X_raw)
-                y   = np.array(y_raw)
-                col = palette[ri % len(palette)]
+                X    = np.array(X_raw)
+                y    = np.array(y_raw)
+                col  = palette[ri % len(palette)]
                 cval = r.get("condition_value", ri)
                 lbl  = f"{cond_label}={cval}"
                 x_vals = X[:, 0] if X.ndim == 2 else X
@@ -1300,17 +1224,17 @@ else:
                 best = r.get("best_objective")
                 n    = len(r.get("X", []))
                 cval = r.get("condition_value", "?")
-                lines.append(f"{cond_label}={cval}: n={n}, best={best:.4f if best is not None else 'N/A'}")
+                best_s = f"{best:.4f}" if best is not None else "N/A"
+                lines.append(f"{cond_label}={cval}: n={n}, best={best_s}")
             ax.text(0.05, 0.95, "\n".join(lines), transform=ax.transAxes,
                     fontsize=8, va="top", fontfamily="monospace")
 
-    # Hide unused axes
     for i in range(len(panels), len(axes_flat)):
         axes_flat[i].set_axis_off()
 
 fig.suptitle("MAESTRO — Experimental Summary", fontsize=10, y=1.01)
-plt.tight_layout()
 """).strip()
+
 
 # ── Plan builder ──────────────────────────────────────────────────────────────
 
@@ -1339,15 +1263,13 @@ def build_execution_plan_from_tool_calls(session, tool_calls: List[dict]) -> Lis
         elif name == "plan_workflow":
             steps = args.get("steps", [])
             for step in steps:
-                # ── Defensive defaults ────────────────────────────────────────────
                 if not step.get("label"):
                     kind  = step.get("kind", "step")
                     cond  = step.get("condition_label", "")
                     val   = step.get("condition_value", "")
                     opt   = step.get("optimiser_name", "")
                     if kind == "optimise_condition" and cond:
-                        opt_display = f" [{opt}]" if opt else ""
-                        step["label"] = f"Optimise {cond}={val}{opt_display}"
+                        step["label"] = f"Optimise {cond}={val}" + (f" [{opt}]" if opt else "")
                     elif kind == "synthesise":
                         step["label"] = "Synthesise sample"
                     elif kind == "characterise":
@@ -1364,22 +1286,13 @@ def build_execution_plan_from_tool_calls(session, tool_calls: List[dict]) -> Lis
                 step.setdefault("dependencies", [])
 
                 if step.get("kind") == "optimise_condition":
-                    if not step.get("condition_label"):
-                        step["condition_label"] = "condition"
-                    if step.get("condition_value") is None:
-                        step["condition_value"] = 0.0
-                    else:
-                        step["condition_value"] = float(step["condition_value"])
-                    if not step.get("free_params"):
-                        step["free_params"] = []
-                    if not step.get("objective_metric"):
-                        step["objective_metric"] = "objective"
-                    if not step.get("n_calls"):
-                        step["n_calls"] = session.optimiser_config.n_calls
-                    if not step.get("n_initial_points"):
-                        step["n_initial_points"] = session.optimiser_config.n_initial_points
-                    if not step.get("optimiser_name"):
-                        step["optimiser_name"] = session.optimiser_config.name
+                    step.setdefault("condition_label", "condition")
+                    step["condition_value"] = float(step.get("condition_value") or 0.0)
+                    step.setdefault("free_params", [])
+                    step.setdefault("objective_metric", "objective")
+                    step.setdefault("n_calls", session.optimiser_config.n_calls)
+                    step.setdefault("n_initial_points", session.optimiser_config.n_initial_points)
+                    step.setdefault("optimiser_name", session.optimiser_config.name)
 
                 plan.append(step)
 
@@ -1396,13 +1309,13 @@ def build_execution_plan_from_tool_calls(session, tool_calls: List[dict]) -> Lis
 
         elif name == "analyse_data":
             plan.append({
-                "kind":           "analyse_data",
-                "step_id":        str(__import__("uuid").uuid4())[:8],
-                "label":          args.get("description", "Analyse data"),
-                "instrument_id":  "reporting",
-                "analysis_code":  args.get("analysis_code", ""),
-                "dependencies":   [],
-                "status":         "pending",
+                "kind":          "analyse_data",
+                "step_id":       str(__import__("uuid").uuid4())[:8],
+                "label":         args.get("description", "Analyse data"),
+                "instrument_id": "reporting",
+                "analysis_code": args.get("analysis_code", ""),
+                "dependencies":  [],
+                "status":        "pending",
             })
 
         elif name == "query_database":
@@ -1461,21 +1374,9 @@ def build_dynamic_timeline(session) -> List[dict]:
         })
 
     if session.sample_registry:
-        # Count all successfully synthesised samples (prepared OR subsequently tested)
-        n_synthesised = sum(
-            1 for s in session.sample_registry
-            if s.status in ("prepared", "tested")
-        )
-        # Count only those that have been characterised (have test results)
-        n_characterised = sum(
-            1 for s in session.sample_registry
-            if s.status == "tested"
-        )
-        # Count synthesis failures separately
-        n_failed = sum(
-            1 for s in session.sample_registry
-            if s.status == "failed"
-        )
+        n_synthesised   = sum(1 for s in session.sample_registry if s.status in ("prepared", "tested"))
+        n_characterised = sum(1 for s in session.sample_registry if s.status == "tested")
+        n_failed        = sum(1 for s in session.sample_registry if s.status == "failed")
         label = f"Samples: {n_synthesised} synthesised, {n_characterised} characterised"
         if n_failed > 0:
             label += f", {n_failed} failed"
